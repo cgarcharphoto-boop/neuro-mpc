@@ -19,6 +19,7 @@ struct SliceDefinition
     float pitchSemitones = 0.0f;
     float timeStretchRatio = 1.0f; // 1.0 = original duration, 2.0 = twice as long
     bool preserveTransients = true; // stretch each transient-delimited segment separately (no pre-echo)
+    float rootNote = -1.0f;         // manual pitch correction (fractional MIDI note); < 0 means use the detected pitch
     bool reverse = false;
     bool enabled = true;
 
@@ -110,6 +111,15 @@ public:
         return true;
     }
 
+    bool setRootNote (int i, float midiNote)
+    {
+        if (i < 0 || i >= size())
+            return false;
+
+        slices[(size_t) i].rootNote = midiNote < 0.0f ? -1.0f : std::clamp (midiNote, 0.0f, 127.0f);
+        return true;
+    }
+
     bool setPreserveTransients (int i, bool preserve)
     {
         if (i < 0 || i >= size())
@@ -164,6 +174,7 @@ public:
         {
             auto& s = restored[i];
             s.timeStretchRatio = std::clamp (s.timeStretchRatio, minStretch, maxStretch);
+            s.rootNote = s.rootNote < 0.0f ? -1.0f : std::min (s.rootNote, 127.0f);
 
             if (s.id <= 0 || s.length() < minSliceLength || (i > 0 && restored[i - 1].endSample != s.startSample))
                 return false;

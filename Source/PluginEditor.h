@@ -52,6 +52,8 @@ private:
     juce::Slider stretch { juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight };
     juce::TextButton halfButton { "x0.5" }, doubleButton { "x2" }, resetButton { "1:1" }, allButton { "Apply to all" };
     juce::ToggleButton preserveTransients { "Preserve transients" };
+    juce::Label pitchInfo;
+    juce::ComboBox rootNote;
     std::vector<std::unique_ptr<Pad>> pads;
     std::unique_ptr<SliderAttachment> gainAttachment, attackAttachment, releaseAttachment;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> modeAttachment;

@@ -31,6 +31,30 @@ namespace
         return file;
     }
 
+    juce::File writeToneWav (const juce::File& file, double hz, double seconds)
+    {
+        juce::AudioBuffer<float> buf (2, (int) (rate * seconds));
+
+        for (int i = 0; i < buf.getNumSamples(); ++i)
+        {
+            float v = 0.0f;
+            for (int h = 1; h <= 5; ++h)
+                v += 0.25f / (float) h * (float) std::sin (2.0 * juce::MathConstants<double>::pi * hz * h * i / rate);
+            buf.setSample (0, i, v);
+            buf.setSample (1, i, v);
+        }
+
+        file.deleteFile();
+        juce::WavAudioFormat wav;
+        std::unique_ptr<juce::OutputStream> out (file.createOutputStream().release());
+        auto options = juce::AudioFormatWriterOptions().withSampleRate (rate).withNumChannels (2).withBitsPerSample (24);
+
+        if (auto writer = wav.createWriterFor (out, options))
+            writer->writeFromAudioSampleBuffer (buf, 0, buf.getNumSamples());
+
+        return file;
+    }
+
     struct Run { int nonZero = 0; float peak = 0.0f; bool finite = true; };
 
     // Renders numBlocks blocks; events = (block index, note, velocity) at sample offset 0.
@@ -224,7 +248,7 @@ int main()
 
     // Per-slice stretch through the processor: renders in the background, other slices unaffected.
     p.editSlices ([] (auto& s) { s.grid (4); s.setStretch (1, 2.0f); s.setStretch (3, 0.5f); });
-    CHECK (p.waitForStretchRenders (20000));
+    CHECK (p.waitForBackgroundWork (20000));
     CHECK (p.getStretchStatus (1) == NeuroMPCProcessor::StretchStatus::ready);
     CHECK (p.getStretchStatus (0) == NeuroMPCProcessor::StretchStatus::original);
     r = render (p, 80, { { 0, 37, 1.0f } });
@@ -236,7 +260,7 @@ int main()
     // Changing a ratio while its old render is playing stops that voice safely; the new render plays.
     render (p, 2, { { 0, 37, 1.0f } });
     p.editSlices ([] (auto& s) { s.setStretch (1, 3.0f); });
-    CHECK (p.waitForStretchRenders (20000));
+    CHECK (p.waitForBackgroundWork (20000));
     CHECK (render (p, 4).nonZero == 0);
     CHECK (std::abs (render (p, 120, { { 0, 37, 1.0f } }).nonZero - 36000) <= 360);
 
@@ -247,12 +271,53 @@ int main()
         NeuroMPCProcessor q;
         q.prepareToPlay (rate, block);
         q.setStateInformation (stretched.getData(), (int) stretched.getSize());
-        CHECK (q.waitForStretchRenders (20000));
+        CHECK (q.waitForBackgroundWork (20000));
         CHECK (q.getSlices().getSlices()[1].timeStretchRatio == 3.0f);
         CHECK (std::abs (render (q, 120, { { 0, 37, 1.0f } }).nonZero - 36000) <= 360);
     }
 
     p.editSlices ([] (auto& s) { s.reset (s.getTotalLength()); });
+
+    // Pitch analysis runs in the background for the sample and every slice, and follows slice edits.
+    {
+        auto toneFile = writeToneWav (juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("neuro_tone.wav"), 220.0, 2.0);
+        NeuroMPCProcessor a;
+        CHECK (a.loadSample (toneFile, error));
+        a.editSlices ([] (auto& s) { s.grid (2); });
+        CHECK (a.getSliceAnalysis (0) == nullptr); // pending
+        const auto t0 = juce::Time::getMillisecondCounterHiRes();
+        CHECK (a.waitForBackgroundWork (20000));
+        std::printf ("  analysis of 2 s stereo + 2 slices: %.0f ms\n", juce::Time::getMillisecondCounterHiRes() - t0);
+
+        const auto* whole = a.getSampleAnalysis();
+        CHECK (whole != nullptr && whole->pitch.status == neuro::PitchEstimate::Status::pitched && whole->pitch.nearestNote() == 57);
+        CHECK (whole != nullptr && whole->key.status != neuro::KeyEstimate::Status::key); // one note is not a key
+
+        for (int i = 0; i < 2; ++i)
+        {
+            const auto* sa = a.getSliceAnalysis (i);
+            CHECK (sa != nullptr && sa->pitch.nearestNote() == 57 && std::abs (sa->pitch.cents()) < 2.0);
+        }
+
+        a.editSlices ([] (auto& s) { s.split (12000); });
+        CHECK (a.getSliceAnalysis (0) == nullptr); // region changed: stale result is not reported
+        CHECK (a.waitForBackgroundWork (20000));
+        CHECK (a.getSliceAnalysis (0) != nullptr && a.getSliceAnalysis (1) != nullptr && a.getSliceAnalysis (2) != nullptr);
+
+        // Manual correction persists.
+        a.editSlices ([] (auto& s) { s.setRootNote (1, 60.0f); });
+        juce::MemoryBlock st;
+        a.getStateInformation (st);
+        NeuroMPCProcessor b;
+        b.setStateInformation (st.getData(), (int) st.getSize());
+        CHECK (b.getSlices().getSlices()[1].rootNote == 60.0f && b.getSlices().getSlices()[0].rootNote < 0.0f);
+        CHECK (b.waitForBackgroundWork (20000) && b.getSliceAnalysis (2) != nullptr);
+        toneFile.deleteFile();
+    }
+
+    // DC test sample has no pitch.
+    CHECK (p.waitForBackgroundWork (20000));
+    CHECK (p.getSampleAnalysis() != nullptr && p.getSampleAnalysis()->pitch.status != neuro::PitchEstimate::Status::pitched);
 
     // UI audition path (lock-free FIFO) triggers playback.
     p.editSlices ([] (auto& s) { s.grid (2); });

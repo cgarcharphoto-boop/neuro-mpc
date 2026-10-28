@@ -4,6 +4,8 @@
 #include <juce_audio_formats/juce_audio_formats.h>
 #include "Audio/VoiceEngine.h"
 #include "Core/RtShared.h"
+#include "DSP/Analysis.h"
+#include "DSP/BackgroundWorker.h"
 
 namespace ParamIDs
 {
@@ -52,8 +54,13 @@ public:
 
     enum class StretchStatus { original, rendering, ready };
     StretchStatus getStretchStatus (int sliceIndex) const;
-    void processStretchResults();              // also driven by the internal timer, so it works with the editor closed
-    bool waitForStretchRenders (int timeoutMs); // for tests and offline use
+    // Pitch/key analysis, run in the background whenever the sample or a slice region changes.
+    // Returns nullptr while the analysis for the current region is pending.
+    const neuro::AnalysisResult* getSliceAnalysis (int sliceIndex) const;
+    const neuro::AnalysisResult* getSampleAnalysis() const;
+
+    void processBackgroundResults();            // also driven by the internal timer, so it works with the editor closed
+    bool waitForBackgroundWork (int timeoutMs); // for tests and offline use
 
     juce::AudioFormatManager formats;
     juce::AudioProcessorValueTreeState apvts;
@@ -62,7 +69,8 @@ private:
     static juce::AudioProcessorValueTreeState::ParameterLayout createLayout();
     void publishSlices();
     void refreshStretch();
-    void timerCallback() override { processStretchResults(); }
+    void refreshAnalysis();
+    void timerCallback() override { processBackgroundResults(); }
 
     std::shared_ptr<const neuro::SampleData> sample;
     neuro::SliceSet slices;
@@ -76,12 +84,16 @@ private:
 
     static constexpr size_t stretchCacheBudgetBytes = 512u << 20;
     struct CacheEntry { neuro::StretchEntry entry; uint64_t lastUse = 0; };
-    neuro::StretchRenderer stretchRenderer;
+    neuro::BackgroundWorker<neuro::StretchJob, neuro::StretchDone> stretchRenderer { "NEURO stretch", neuro::renderStretchJob };
     neuro::RtShared<neuro::StretchBank> rtStretch;
     std::shared_ptr<const neuro::StretchBank> stretchBank;
     std::vector<CacheEntry> stretchCache;
     std::vector<neuro::StretchKey> stretchRequested;
     uint64_t cacheClock = 0;
+
+    neuro::BackgroundWorker<neuro::AnalysisJob, neuro::AnalysisResult> analyser { "NEURO analysis", neuro::analyseRegion };
+    std::map<int, neuro::AnalysisResult> analyses;                      // by slice id; 0 = whole sample
+    std::map<int, std::pair<int64_t, int64_t>> analysisRequested;       // id -> requested region
     neuro::VoiceEngine engine;
 
     struct UiNote { int note; float velocity; };

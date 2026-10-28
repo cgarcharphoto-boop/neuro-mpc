@@ -3,7 +3,7 @@
 An open-source, MPC-style slice sampler for macOS: VST3 (Ableton Live), AU (Logic Pro), and Standalone.
 C++20 · JUCE 9.0.4 (pinned) · CMake. The master spec lives in `../gmni sampler/`.
 
-## Status: Milestone 1 + Phase 6 (per-slice time-stretch)
+## Status: Milestone 1 + Phases 6–7 (time-stretch, pitch analysis)
 
 | Works and is tested | |
 |---|---|
@@ -14,6 +14,7 @@ C++20 · JUCE 9.0.4 (pinned) · CMake. The master spec lives in `../gmni sampler
 | Pads | 4×4 bank (pad 1 at bottom-left), velocity set by click height, lit while its slice plays |
 | State | Parameters, sample path, slices (stable ids) saved in the DAW project; a missing file is reported, never substituted |
 | Time-stretch | Per-slice ratio ×0.25–×4 with pitch preserved (Signalsmith Stretch), target duration, ×0.5/×2/1:1, Apply to all, per-slice Preserve transients, background rendering + LRU cache. See [Documentation/TIME_STRETCHING.md](Documentation/TIME_STRETCHING.md) |
+| Pitch & key | YIN pitch per slice and per sample with confidence, a polyphony check, and pitched/uncertain/unpitched status; chroma + Krumhansl–Kessler key that reports uncertainty honestly; per-slice manual Root correction. See [Documentation/PITCH_ANALYSIS.md](Documentation/PITCH_ANALYSIS.md) |
 | Real-time safety | No locks, file I/O or allocation on the audio thread. Samples and slices reach the audio thread through `RtShared` (hazard-pointer handoff); UI note input goes through a lock-free FIFO |
 
 **Validation:** `auval` passes. Unit and integration tests pass (`ctest`).
@@ -34,9 +35,9 @@ Builds are installed to `~/Library/Audio/Plug-Ins/{VST3,Components}`. The Standa
 ## Layout
 
 ```
-Source/Core/    JUCE-free model + DSP: SliceSet, TransientDetector, RtShared   (unit-tested)
+Source/Core/    JUCE-free model + DSP: SliceSet, TransientDetector, PitchDetector, KeyDetector, RtShared (unit-tested)
 Source/Audio/   SampleData, VoiceEngine
-Source/DSP/     TimeStretch (renderStretch, StretchRenderer, StretchBank)
+Source/DSP/     TimeStretch, Analysis, BackgroundWorker (coalescing job thread)
 ThirdParty/     vendored MIT header libraries (Documentation/LICENSES.md)
 Source/UI/      WaveformView
 Source/Plugin*  processor (params, MIDI, state) and editor

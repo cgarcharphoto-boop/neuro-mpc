@@ -90,71 +90,12 @@ std::shared_ptr<juce::AudioBuffer<float>> renderStretch (const juce::AudioBuffer
     return output;
 }
 
-StretchRenderer::StretchRenderer() : juce::Thread ("NEURO stretch renderer")
+StretchDone renderStretchJob (const StretchJob& job)
 {
-    startThread (juce::Thread::Priority::low);
-}
-
-StretchRenderer::~StretchRenderer()
-{
-    signalThreadShouldExit();
-    notify();
-    stopThread (10000);
-}
-
-void StretchRenderer::request (Job job)
-{
-    {
-        std::scoped_lock lock (mutex);
-        pending[job.slice.id] = std::move (job);
-    }
-
-    notify();
-}
-
-std::vector<StretchRenderer::Done> StretchRenderer::takeCompleted()
-{
-    std::scoped_lock lock (mutex);
-    return std::exchange (done, {});
-}
-
-bool StretchRenderer::isIdle() const
-{
-    std::scoped_lock lock (mutex);
-    return pending.empty() && ! working;
-}
-
-void StretchRenderer::run()
-{
-    while (! threadShouldExit())
-    {
-        std::optional<Job> job;
-
-        {
-            std::scoped_lock lock (mutex);
-
-            if (! pending.empty())
-            {
-                job = std::move (pending.begin()->second);
-                pending.erase (pending.begin());
-                working = true;
-            }
-        }
-
-        if (! job)
-        {
-            wait (-1);
-            continue;
-        }
-
-        const auto& s = job->slice;
-        auto audio = renderStretch (job->sample->buffer, s.startSample, s.endSample, job->sample->sampleRate,
-                                    s.timeStretchRatio, s.preserveTransients);
-
-        std::scoped_lock lock (mutex);
-        done.push_back ({ job->sampleVersion, { StretchKey::of (s), std::move (audio) } });
-        working = false;
-    }
+    const auto& s = job.slice;
+    return { job.sampleVersion,
+             { StretchKey::of (s), renderStretch (job.sample->buffer, s.startSample, s.endSample, job.sample->sampleRate,
+                                                  s.timeStretchRatio, s.preserveTransients) } };
 }
 
 } // namespace neuro

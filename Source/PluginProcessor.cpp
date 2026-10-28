@@ -165,13 +165,15 @@ bool NeuroMPCProcessor::loadSample (const juce::File& file, juce::String& error)
     }
 
     sample = data;
+    ++sampleVersion; // before any work is requested for the new sample
     rtSample.publish (sample);
     stretchCache.clear();
     stretchRequested.clear();
+    analyses.clear();
+    analysisRequested.clear();
     slices.reset (length);
     publishSlices();
     missingSamplePath.clear();
-    ++sampleVersion;
     return true;
 }
 
@@ -185,6 +187,52 @@ void NeuroMPCProcessor::publishSlices()
 {
     rtSlices.publish (std::make_shared<const neuro::SliceSet> (slices));
     refreshStretch();
+    refreshAnalysis();
+}
+
+void NeuroMPCProcessor::refreshAnalysis()
+{
+    if (sample == nullptr)
+        return;
+
+    auto want = [this] (int id, int64_t start, int64_t end)
+    {
+        if (auto it = analyses.find (id); it != analyses.end() && it->second.covers (start, end))
+            return;
+
+        if (auto it = analysisRequested.find (id); it != analysisRequested.end() && it->second == std::pair (start, end))
+            return;
+
+        analysisRequested[id] = { start, end };
+        analyser.request (id, { sample, sampleVersion, id, start, end });
+    };
+
+    want (0, 0, sample->length());
+
+    for (const auto& s : slices.getSlices())
+        want (s.id, s.startSample, s.endSample);
+
+    std::erase_if (analyses, [this] (const auto& kv)
+    {
+        return kv.first != 0 && std::none_of (slices.getSlices().begin(), slices.getSlices().end(),
+                                              [&] (const auto& s) { return s.id == kv.first; });
+    });
+}
+
+const neuro::AnalysisResult* NeuroMPCProcessor::getSliceAnalysis (int sliceIndex) const
+{
+    if (sliceIndex < 0 || sliceIndex >= slices.size())
+        return nullptr;
+
+    const auto& s = slices.getSlices()[(size_t) sliceIndex];
+    const auto it = analyses.find (s.id);
+    return it != analyses.end() && it->second.covers (s.startSample, s.endSample) ? &it->second : nullptr;
+}
+
+const neuro::AnalysisResult* NeuroMPCProcessor::getSampleAnalysis() const
+{
+    const auto it = analyses.find (0);
+    return sample != nullptr && it != analyses.end() && it->second.covers (0, sample->length()) ? &it->second : nullptr;
 }
 
 // Builds the bank for the current slices from the cache, requests missing renders, evicts LRU entries.
@@ -210,7 +258,7 @@ void NeuroMPCProcessor::refreshStretch()
             // The renderer replaces any pending job for this slice, so forget older requests for it.
             std::erase_if (stretchRequested, [&] (const auto& k) { return k.sliceId == key.sliceId; });
             stretchRequested.push_back (key);
-            stretchRenderer.request ({ sample, sampleVersion, s });
+            stretchRenderer.request (s.id, { sample, sampleVersion, s });
         }
     }
 
@@ -245,8 +293,17 @@ void NeuroMPCProcessor::refreshStretch()
     }
 }
 
-void NeuroMPCProcessor::processStretchResults()
+void NeuroMPCProcessor::processBackgroundResults()
 {
+    for (auto& r : analyser.takeCompleted())
+    {
+        if (auto it = analysisRequested.find (r.sliceId); it != analysisRequested.end() && it->second == std::pair (r.start, r.end))
+            analysisRequested.erase (it);
+
+        if (r.sampleVersion == sampleVersion)
+            analyses[r.sliceId] = std::move (r);
+    }
+
     auto results = stretchRenderer.takeCompleted();
 
     for (auto& r : results)
@@ -261,15 +318,15 @@ void NeuroMPCProcessor::processStretchResults()
         refreshStretch();
 }
 
-bool NeuroMPCProcessor::waitForStretchRenders (int timeoutMs)
+bool NeuroMPCProcessor::waitForBackgroundWork (int timeoutMs)
 {
     const auto deadline = juce::Time::getMillisecondCounter() + (juce::uint32) timeoutMs;
 
     while (juce::Time::getMillisecondCounter() < deadline)
     {
-        processStretchResults();
+        processBackgroundResults();
 
-        if (stretchRequested.empty() && stretchRenderer.isIdle())
+        if (stretchRequested.empty() && stretchRenderer.isIdle() && analysisRequested.empty() && analyser.isIdle())
             return true;
 
         juce::Thread::sleep (2);
@@ -319,6 +376,7 @@ void NeuroMPCProcessor::getStateInformation (juce::MemoryBlock& dest)
         t.setProperty ("pitch", s.pitchSemitones, nullptr);
         t.setProperty ("stretch", s.timeStretchRatio, nullptr);
         t.setProperty ("preserveTransients", s.preserveTransients, nullptr);
+        t.setProperty ("rootNote", s.rootNote, nullptr);
         t.setProperty ("reverse", s.reverse, nullptr);
         t.setProperty ("enabled", s.enabled, nullptr);
         sliceTree.appendChild (t, nullptr);
@@ -368,6 +426,7 @@ void NeuroMPCProcessor::setStateInformation (const void* data, int size)
         s.pitchSemitones = t.getProperty ("pitch", 0.0f);
         s.timeStretchRatio = t.getProperty ("stretch", 1.0f);
         s.preserveTransients = t.getProperty ("preserveTransients", true);
+        s.rootNote = t.getProperty ("rootNote", -1.0f);
         s.reverse = t.getProperty ("reverse", false);
         s.enabled = t.getProperty ("enabled", true);
         restored.push_back (s);

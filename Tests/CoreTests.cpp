@@ -1,3 +1,5 @@
+#include "Core/KeyDetector.h"
+#include "Core/PitchDetector.h"
 #include "Core/RtShared.h"
 #include "Core/SliceSet.h"
 #include "Core/TransientDetector.h"
@@ -154,11 +156,151 @@ static void rtSharedTests()
     CHECK (shared.poolSize() <= 2);
 }
 
+namespace
+{
+    constexpr double sr = 48000.0;
+    constexpr double twoPi = 6.283185307179586;
+
+    // Sum of harmonic tones (MIDI notes) with 1/k harmonic rolloff, for `seconds`.
+    std::vector<float> tones (std::initializer_list<double> notes, double seconds, int harmonics = 4)
+    {
+        std::vector<float> x ((size_t) (seconds * sr), 0.0f);
+
+        for (auto note : notes)
+            for (int h = 1; h <= harmonics; ++h)
+                for (size_t i = 0; i < x.size(); ++i)
+                    x[i] += 0.2f / (float) h * (float) std::sin (twoPi * midiToFrequency (note) * h * (double) i / sr);
+
+        return x;
+    }
+
+    std::vector<float> sequence (std::initializer_list<std::initializer_list<double>> chords, double secondsEach)
+    {
+        std::vector<float> out;
+
+        for (auto c : chords)
+        {
+            auto part = tones (c, secondsEach);
+            out.insert (out.end(), part.begin(), part.end());
+        }
+
+        return out;
+    }
+
+    PitchEstimate pitchOf (const std::vector<float>& x)
+    {
+        const float* ch[] = { x.data() };
+        return detectPitch (ch, 1, (int64_t) x.size(), sr);
+    }
+
+    KeyEstimate keyOf (const std::vector<float>& x)
+    {
+        const float* ch[] = { x.data() };
+        return detectKey (ch, 1, (int64_t) x.size(), sr);
+    }
+
+    const char* statusName (PitchEstimate::Status s)
+    {
+        return s == PitchEstimate::Status::pitched ? "pitched" : s == PitchEstimate::Status::uncertain ? "uncertain"
+             : s == PitchEstimate::Status::unpitched ? "unpitched" : "tooShort";
+    }
+}
+
+static void pitchTests()
+{
+    for (double note : { 33.0, 45.0, 57.0, 69.0, 81.0, 93.0, 69.3 }) // A1..A6 and A4 +30 cents
+    {
+        auto p = pitchOf (tones ({ note }, 1.0, 1));
+        std::printf ("  sine %.1f (%.1f Hz): %s midi %.3f conf %.2f\n", note, midiToFrequency (note), statusName (p.status), p.midi, p.confidence);
+        CHECK (p.status == PitchEstimate::Status::pitched && ! p.ambiguous && std::abs (p.midi - note) < 0.05 && p.confidence > 0.9f);
+    }
+
+    auto harmonic = pitchOf (tones ({ 55.0 }, 1.0, 8)); // G3 with 8 harmonics
+    CHECK (harmonic.status == PitchEstimate::Status::pitched && harmonic.nearestNote() == 55 && std::abs (harmonic.cents()) < 5.0);
+
+    // Missing fundamental but strong 2nd harmonic (e.g. bass through small speakers) is still a single tone.
+    {
+        auto x = tones ({ 45.0 }, 1.0, 1);
+        for (auto& v : x) v *= 0.1f;
+        auto upper = tones ({ 57.0 }, 1.0, 1); // octave = 2nd harmonic
+        auto third = tones ({ 64.02 }, 1.0, 1); // 3rd harmonic (A2 * 3 = E4 + 2 cents)
+        for (size_t i = 0; i < x.size(); ++i) x[i] += upper[i] + 0.5f * third[i];
+        auto weak = pitchOf (x);
+        std::printf ("  weak fundamental A2: %s midi %.2f conf %.2f\n", statusName (weak.status), weak.midi, weak.confidence);
+        CHECK (weak.status == PitchEstimate::Status::pitched && weak.nearestNote() == 45);
+    }
+
+    auto detuned = pitchOf (tones ({ 69.3 }, 1.0));
+    CHECK (detuned.nearestNote() == 69 && std::abs (detuned.cents() - 30.0) < 3.0);
+
+    std::vector<float> noise ((size_t) sr);
+    std::mt19937 rng (3);
+    std::uniform_real_distribution<float> u (-0.5f, 0.5f);
+    for (auto& v : noise) v = u (rng);
+    auto pn = pitchOf (noise);
+    std::printf ("  noise: %s conf %.2f\n", statusName (pn.status), pn.confidence);
+    CHECK (pn.status == PitchEstimate::Status::unpitched || pn.status == PitchEstimate::Status::uncertain);
+    CHECK (pn.confidence < 0.6f);
+
+    CHECK (pitchOf (std::vector<float> ((size_t) sr, 0.0f)).status == PitchEstimate::Status::unpitched);
+    CHECK (pitchOf (tones ({ 69.0 }, 0.01)).status == PitchEstimate::Status::tooShort);
+
+    for (auto chord : { std::vector<double> { 57.0, 61.0, 64.0 }, std::vector<double> { 69.0, 70.0 }, std::vector<double> { 60.0, 66.0 } })
+    {
+        std::vector<float> x ((size_t) sr, 0.0f);
+        for (auto note : chord) { auto t = tones ({ note }, 1.0); for (size_t i = 0; i < x.size(); ++i) x[i] += t[i]; }
+        auto pc = pitchOf (x);
+        std::printf ("  chord (%zu notes from %.0f): %s%s midi %.2f conf %.2f\n", chord.size(), chord[0], statusName (pc.status),
+                     pc.ambiguous ? " (ambiguous)" : "", pc.midi, pc.confidence);
+        CHECK (pc.status != PitchEstimate::Status::pitched && pc.ambiguous);
+    }
+}
+
+static void keyTests()
+{
+    auto print = [] (const char* name, const KeyEstimate& k)
+    {
+        std::printf ("  key %s: %s  %s %s r=%.2f margin=%.2f  (alt %s %s)\n", name,
+                     k.status == KeyEstimate::Status::key ? "key" : k.status == KeyEstimate::Status::uncertain ? "uncertain" : "unavailable",
+                     pitchClassName (k.candidates[0].tonic), k.candidates[0].minor ? "minor" : "major", k.candidates[0].correlation, k.margin,
+                     pitchClassName (k.candidates[1].tonic), k.candidates[1].minor ? "minor" : "major");
+    };
+
+    // I-IV-V-I in C major.
+    auto cMajor = keyOf (sequence ({ { 60, 64, 67 }, { 65, 69, 72 }, { 67, 71, 74 }, { 60, 64, 67 } }, 1.0));
+    print ("C major I-IV-V-I", cMajor);
+    CHECK (cMajor.status == KeyEstimate::Status::key && cMajor.candidates[0].tonic == 0 && ! cMajor.candidates[0].minor);
+
+    // i-iv-V-i in A minor (harmonic minor dominant).
+    auto aMinor = keyOf (sequence ({ { 57, 60, 64 }, { 62, 65, 69 }, { 64, 68, 71 }, { 57, 60, 64 } }, 1.0));
+    print ("A minor i-iv-V-i", aMinor);
+    CHECK (aMinor.status == KeyEstimate::Status::key && aMinor.candidates[0].tonic == 9 && aMinor.candidates[0].minor);
+
+    // Same progression transposed to F# major.
+    auto fsMajor = keyOf (sequence ({ { 66, 70, 73 }, { 71, 75, 78 }, { 73, 77, 80 }, { 66, 70, 73 } }, 1.0));
+    print ("F# major I-IV-V-I", fsMajor);
+    CHECK (fsMajor.status == KeyEstimate::Status::key && fsMajor.candidates[0].tonic == 6 && ! fsMajor.candidates[0].minor);
+
+    auto single = keyOf (tones ({ 69.0 }, 2.0));
+    print ("single A4", single);
+    CHECK (single.status != KeyEstimate::Status::key);
+
+    std::vector<float> chromatic;
+    for (int note = 60; note < 72; ++note) { auto t = tones ({ (double) note }, 0.3); chromatic.insert (chromatic.end(), t.begin(), t.end()); }
+    auto chrom = keyOf (chromatic);
+    print ("chromatic scale", chrom);
+    CHECK (chrom.status != KeyEstimate::Status::key);
+
+    CHECK (keyOf (std::vector<float> ((size_t) sr, 0.0f)).status == KeyEstimate::Status::unavailable);
+}
+
 int main()
 {
     sliceSetTests();
     transientTests();
     rtSharedTests();
+    pitchTests();
+    keyTests();
     std::printf (failures == 0 ? "All core tests passed\n" : "%d failure(s)\n", failures);
     return failures == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
 }

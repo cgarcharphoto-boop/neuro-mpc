@@ -6,6 +6,36 @@ namespace
     constexpr int numPads = 16;
     const juce::Colour background { 0xff0e1014 }, panel { 0xff1c1f26 }, accent { 0xffff8a3d };
 
+    juce::String describePitch (const neuro::PitchEstimate& p)
+    {
+        using Status = neuro::PitchEstimate::Status;
+
+        if (p.status == Status::tooShort)  return "too short to analyse";
+        if (p.status == Status::unpitched) return "unpitched";
+
+        const auto cents = juce::roundToInt (p.cents());
+        auto text = juce::MidiMessage::getMidiNoteName (p.nearestNote(), true, true, 3) + (cents >= 0 ? " +" : " ")
+                    + juce::String (cents) + " c (" + juce::String (p.frequency, 1) + " Hz)  "
+                    + juce::String (juce::roundToInt (p.confidence * 100.0f)) + "%";
+
+        return p.status == Status::uncertain ? "uncertain: " + text + (p.ambiguous ? ", likely polyphonic" : "") : text;
+    }
+
+    juce::String describeKey (const neuro::KeyEstimate& k)
+    {
+        auto name = [] (const neuro::KeyEstimate::Candidate& c)
+        {
+            return juce::String (neuro::pitchClassName (c.tonic)) + (c.minor ? " minor" : " major");
+        };
+
+        if (k.status == neuro::KeyEstimate::Status::unavailable)
+            return "unavailable";
+
+        const auto best = name (k.candidates[0]) + " (r " + juce::String (k.candidates[0].correlation, 2) + ")";
+        return k.status == neuro::KeyEstimate::Status::key ? best + ", alt " + name (k.candidates[1])
+                                                         : "uncertain: " + best + " / " + name (k.candidates[1]);
+    }
+
     void setupKnob (juce::Slider& s, juce::Component& parent)
     {
         s.setSliderStyle (juce::Slider::RotaryVerticalDrag);
@@ -46,7 +76,7 @@ NeuroMPCEditor::NeuroMPCEditor (NeuroMPCProcessor& p) : AudioProcessorEditor (p)
                                                              &clearButton, &sensitivity, &gridDivisions, &playMode, &info,
                                                              &sliceTitle, &durationInfo, &targetSeconds, &stretch,
                                                              &halfButton, &doubleButton, &resetButton, &allButton,
-                                                             &preserveTransients })
+                                                             &preserveTransients, &pitchInfo, &rootNote })
         addAndMakeVisible (c);
 
     for (int i = 0; i < numPads; ++i)
@@ -114,6 +144,20 @@ NeuroMPCEditor::NeuroMPCEditor (NeuroMPCProcessor& p) : AudioProcessorEditor (p)
             proc.editSlices ([sel, on = preserveTransients.getToggleState()] (auto& set) { set.setPreserveTransients (sel, on); });
     };
 
+    rootNote.addItem ("Root: detected", 1);
+
+    for (int note = 0; note < 128; ++note)
+        rootNote.addItem ("Root: " + juce::MidiMessage::getMidiNoteName (note, true, true, 3), note + 2);
+
+    rootNote.setTooltip ("Manual pitch correction: overrides the detected pitch for this slice");
+    rootNote.onChange = [this]
+    {
+        const auto sel = waveform.getSelectedSlice();
+
+        if (sel >= 0 && sel < proc.getSlices().size())
+            proc.editSlices ([sel, id = rootNote.getSelectedId()] (auto& set) { set.setRootNote (sel, id <= 1 ? -1.0f : (float) (id - 2)); });
+    };
+
     sliceTitle.setFont (juce::FontOptions (14.0f, juce::Font::bold));
     targetSeconds.setEditable (true);
     targetSeconds.setTooltip ("Target duration in seconds (sets the ratio)");
@@ -137,8 +181,8 @@ NeuroMPCEditor::NeuroMPCEditor (NeuroMPCProcessor& p) : AudioProcessorEditor (p)
     info.setJustificationType (juce::Justification::topLeft);
 
     setResizable (true, true);
-    setResizeLimits (760, 520, 2400, 1600);
-    setSize (980, 620);
+    setResizeLimits (820, 600, 2400, 1600);
+    setSize (1000, 680);
     startTimerHz (30);
 }
 
@@ -171,6 +215,11 @@ void NeuroMPCEditor::updateInfo()
              << s->buffer.getNumChannels() << " ch\n"
              << proc.getSlices().size() << " slices  |  selected: "
              << (waveform.getSelectedSlice() >= 0 ? juce::String (waveform.getSelectedSlice() + 1) : juce::String ("-"));
+
+    if (const auto* a = proc.getSampleAnalysis())
+        text << "\nSample pitch: " << describePitch (a->pitch) << "\nKey: " << describeKey (a->key);
+    else if (proc.getSample() != nullptr)
+        text << "\nAnalysing...";
     else
         text << "No sample loaded";
 
@@ -204,13 +253,14 @@ void NeuroMPCEditor::updateSlicePanel()
     const auto valid = sample != nullptr && sel >= 0 && sel < proc.getSlices().size();
 
     for (auto* c : std::initializer_list<juce::Component*> { &stretch, &halfButton, &doubleButton, &resetButton, &allButton,
-                                                             &targetSeconds, &preserveTransients })
+                                                             &targetSeconds, &preserveTransients, &rootNote })
         c->setEnabled (valid);
 
     if (! valid)
     {
         sliceTitle.setText ("Select a slice", juce::dontSendNotification);
         durationInfo.setText ({}, juce::dontSendNotification);
+        pitchInfo.setText ({}, juce::dontSendNotification);
         return;
     }
 
@@ -221,6 +271,11 @@ void NeuroMPCEditor::updateSlicePanel()
     sliceTitle.setText ("SLICE " + juce::String (sel + 1) + "  (pad " + juce::String (sel + 1) + ")", juce::dontSendNotification);
     stretch.setValue (slice.timeStretchRatio, juce::dontSendNotification);
     preserveTransients.setToggleState (slice.preserveTransients, juce::dontSendNotification);
+    rootNote.setSelectedId (slice.rootNote < 0.0f ? 1 : juce::roundToInt (slice.rootNote) + 2, juce::dontSendNotification);
+
+    const auto* analysis = proc.getSliceAnalysis (sel);
+    pitchInfo.setText ("Pitch: " + (analysis != nullptr ? describePitch (analysis->pitch) : juce::String ("analysing...")),
+                       juce::dontSendNotification);
     durationInfo.setText (juce::String (original, 3) + " s  ->  " + juce::String (original * slice.timeStretchRatio, 3) + " s   "
                               + (status == NeuroMPCProcessor::StretchStatus::rendering ? "rendering..."
                                  : status == NeuroMPCProcessor::StretchStatus::ready ? "stretched" : "original"),
@@ -303,7 +358,7 @@ void NeuroMPCEditor::resized()
     for (auto* k : { &gain, &attack, &release })
         k->setBounds (knobs.removeFromLeft (90));
 
-    auto slicePanel = bottom.removeFromTop (88);
+    auto slicePanel = bottom.removeFromTop (118);
     sliceTitle.setBounds (slicePanel.removeFromTop (22));
     auto row = slicePanel.removeFromTop (28);
     stretch.setBounds (row.removeFromLeft (juce::jmin (320, row.getWidth() - 220)));
@@ -321,6 +376,11 @@ void NeuroMPCEditor::resized()
     targetSeconds.setBounds (row2.removeFromLeft (70));
     row2.removeFromLeft (8);
     preserveTransients.setBounds (row2.removeFromLeft (150));
+    slicePanel.removeFromTop (6);
+    auto row3 = slicePanel.removeFromTop (24);
+    rootNote.setBounds (row3.removeFromLeft (130));
+    row3.removeFromLeft (8);
+    pitchInfo.setBounds (row3);
     durationInfo.setBounds (row2);
 
     info.setBounds (bottom.reduced (0, 4));

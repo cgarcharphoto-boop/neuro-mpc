@@ -3,8 +3,6 @@
 #include <juce_core/juce_core.h>
 #include "../Audio/SampleData.h"
 #include "../Core/SliceSet.h"
-#include <map>
-#include <mutex>
 
 namespace neuro
 {
@@ -68,27 +66,9 @@ struct StretchBank
 std::shared_ptr<juce::AudioBuffer<float>> renderStretch (const juce::AudioBuffer<float>& source, int64_t start, int64_t end,
                                                          double sampleRate, float ratio, bool preserveTransients = true);
 
-// Background worker. Requests for the same slice coalesce, so dragging a ratio only renders the latest value.
-class StretchRenderer : private juce::Thread
-{
-public:
-    struct Job  { std::shared_ptr<const SampleData> sample; int sampleVersion = 0; SliceDefinition slice; };
-    struct Done { int sampleVersion = 0; StretchEntry entry; };
+struct StretchJob  { std::shared_ptr<const SampleData> sample; int sampleVersion = 0; SliceDefinition slice; };
+struct StretchDone { int sampleVersion = 0; StretchEntry entry; };
 
-    StretchRenderer();
-    ~StretchRenderer() override;
-
-    void request (Job);
-    std::vector<Done> takeCompleted();
-    bool isIdle() const;
-
-private:
-    void run() override;
-
-    mutable std::mutex mutex;
-    std::map<int, Job> pending; // by slice id
-    std::vector<Done> done;
-    bool working = false;
-};
+StretchDone renderStretchJob (const StretchJob&);
 
 } // namespace neuro
