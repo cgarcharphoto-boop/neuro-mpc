@@ -146,8 +146,10 @@ void WaveformView::mouseDown (const juce::MouseEvent& e)
 
     if (selected >= 0)
     {
-        auditioning = proc.auditionNote (selected);
-        proc.auditionNote (auditioning, 0.9f);
+        auditioning = proc.startSliceAudition (selected);
+
+        if (onSliceClicked)
+            onSliceClicked();
     }
 
     repaint();
@@ -168,7 +170,7 @@ void WaveformView::mouseUp (const juce::MouseEvent&)
     dragging = -1;
 
     if (auditioning >= 0)
-        proc.auditionNote (auditioning, 0.0f);
+        proc.stopAudition (auditioning);
 
     auditioning = -1;
 }

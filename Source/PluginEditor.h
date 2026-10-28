@@ -18,16 +18,19 @@ public:
     void filesDropped (const juce::StringArray&, int, int) override;
 
 private:
-    // MPC-style pad: velocity from vertical click position (top = loudest), lit while its slice plays.
+    // MPC-style pad (one of 16 visible; the bank selects which 16 of the 64). Velocity from the vertical click position
+    // (top = loudest); lit while its slice plays; click selects it for editing.
     struct Pad : public juce::Component
     {
-        Pad (NeuroMPCProcessor& p, int i) : proc (p), index (i) {}
+        Pad (NeuroMPCEditor& e, int i) : editor (e), index (i) {}
+        int padIndex() const noexcept { return editor.currentBank * neuro::padsPerBank + index; }
         void paint (juce::Graphics&) override;
         void mouseDown (const juce::MouseEvent&) override;
         void mouseUp (const juce::MouseEvent&) override;
 
-        NeuroMPCProcessor& proc;
+        NeuroMPCEditor& editor;
         int index;
+        int heldNote = -1;
         bool lit = false;
     };
 
@@ -38,6 +41,12 @@ private:
     void setSelectedStretch (float ratio, bool allSlices = false);
     void setSelectedPitch (float semitones);
     float selectedRoot() const; // reference for the 12-note selector
+    void selectPad (int padIndex);
+    void showPadPanel (bool pad);
+    void updatePadPanel();
+    void editSelectedPad (const std::function<void (neuro::PadDefinition&)>&);
+    std::vector<juce::Component*> slicePanelComponents();
+    std::vector<juce::Component*> padPanelComponents();
 
     using SliderAttachment = juce::AudioProcessorValueTreeState::SliderAttachment;
 
@@ -71,6 +80,19 @@ private:
     std::vector<std::unique_ptr<SliderAttachment>> sliderAttachments;
     std::vector<std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment>> comboAttachments;
     std::vector<std::unique_ptr<Pad>> pads;
+    std::array<juce::TextButton, neuro::numBanks> bankButtons;
+    juce::TextButton sliceTab { "SLICE" }, padTab { "PAD" };
+    int currentBank = 0, selectedPad = 0, copiedPad = -1, learnBaseline = -1, shownSliceCount = -1;
+    bool showingPad = false;
+
+    // Selected-pad panel
+    juce::Label padTitle, padName;
+    juce::ComboBox padSlice, padNote, padChoke;
+    juce::Slider padGain { juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight },
+                 padPitch { juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight },
+                 padVelocity { juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight };
+    juce::TextButton padLearn { "Learn" }, padColour { "Colour" }, padCopy { "Copy" }, padPaste { "Paste" },
+                     padDuplicate { "Duplicate" }, padClear { "Clear pad" }, padAutoAssign { "Auto-assign" };
     std::unique_ptr<juce::FileChooser> chooser;
     int shownSampleVersion = -1;
     juce::String lastError;

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "SampleData.h"
+#include "../Core/PadBank.h"
 #include "../Core/Scales.h"
 #include "../Core/SliceSet.h"
 #include "../DSP/TimeStretch.h"
@@ -29,11 +30,18 @@ class VoiceEngine
 {
 public:
     static constexpr int maxVoices = 32;
-    static constexpr int baseNote = 36; // pad mode: C1 -> slice 1, MPC pad convention
+    static constexpr int baseNote = 36;     // pad mode without a pad map: C1 -> slice 1
+    static constexpr float chokeMs = 5.0f;  // fade applied to choked voices
 
     void prepare (double hostSampleRate) noexcept;
-    // Plays the slice's render from the bank when it needs one and it is ready, otherwise the original region.
-    void noteOn (int note, float velocity, const SampleData&, const SliceSet&, const StretchBank*, const VoiceParams&) noexcept;
+    // Routes a note: keyboard mode -> the keyboard slice; pad mode -> every pad on that note (layers), or 36+n without pads.
+    void noteOn (int note, float velocity, const SampleData&, const SliceSet&, const StretchBank*, const PadMap*,
+                 const VoiceParams&) noexcept;
+
+    // Starts one slice. noteTag is matched by noteOff (gate mode). Uses the slice's render from the bank when it needs
+    // one and it is ready, otherwise the original region.
+    void playSlice (int sliceIndex, int noteTag, float level, float pitchOffset, int chokeGroup, const SampleData&,
+                    const SliceSet&, const StretchBank*, const VoiceParams&) noexcept;
     void noteOff (int note) noexcept;
     void killAll() noexcept;
     // Stops voices reading renders that are no longer in the published bank (they may be freed).
@@ -55,6 +63,7 @@ private:
         int64_t start = 0, end = 0;
         double pos = 0.0, baseRate = 1.0; // baseRate is negative for reverse playback
         float gain = 0.0f, env = 0.0f, attackStep = 1.0f, releaseStep = 1.0f;
+        int chokeGroup = 0;
         uint64_t order = 0;
     };
 

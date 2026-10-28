@@ -69,6 +69,15 @@ public:
         return (int) (it - slices.begin()) - 1;
     }
 
+    int indexOfId (int id) const noexcept
+    {
+        for (int i = 0; i < size(); ++i)
+            if (slices[(size_t) i].id == id)
+                return i;
+
+        return -1;
+    }
+
     // Inserts a boundary at pos, inheriting the parent slice's settings. Fails if either side would be too short.
     bool split (int64_t pos)
     {

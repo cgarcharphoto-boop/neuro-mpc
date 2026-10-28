@@ -28,6 +28,7 @@ NeuroMPCProcessor::NeuroMPCProcessor()
     keyModeParam   = apvts.getRawParameterValue (ParamIDs::keyMode);
     scaleParam     = apvts.getRawParameterValue (ParamIDs::scale);
     scaleRootParam = apvts.getRawParameterValue (ParamIDs::scaleRoot);
+    publishPads();
     startTimerHz (20);
 }
 
@@ -108,6 +109,7 @@ void NeuroMPCProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     const auto* s  = rtSample.acquire();
     const auto* sl = rtSlices.acquire();
     const auto* bank = rtStretch.acquire(); // after slices: a bank is never older than the slices it serves
+    const auto* padMap = rtPads.acquire();
 
     if (s != lastSample)
     {
@@ -154,24 +156,22 @@ void NeuroMPCProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
         lfoIncrement = bpm / 60.0 / beats / hostSampleRate;
     }
 
-    auto handle = [&] (int note, float velocity)
+    auto handle = [&] (int note, float velocity, int slice = -1)
     {
-        if (velocity > 0.0f)
-        {
-            if (s != nullptr && sl != nullptr)
-                engine.noteOn (note, velocity, *s, *sl, bank, vp);
-        }
-        else
-        {
+        if (velocity <= 0.0f)
             engine.noteOff (note);
-        }
+        else if (s != nullptr && sl != nullptr && slice >= 0)
+            engine.playSlice (slice, note, velocity, 0.0f, 0, *s, *sl, bank, vp);
+        else if (s != nullptr && sl != nullptr)
+            engine.noteOn (note, velocity, *s, *sl, bank, padMap, vp);
     };
 
     {
         const auto scope = uiFifo.read (uiFifo.getNumReady());
+        auto handleUi = [&] (const UiNote& u) { handle (u.note, u.velocity, u.slice); };
 
-        for (int i = 0; i < scope.blockSize1; ++i) handle (uiNotes[(size_t) (scope.startIndex1 + i)].note, uiNotes[(size_t) (scope.startIndex1 + i)].velocity);
-        for (int i = 0; i < scope.blockSize2; ++i) handle (uiNotes[(size_t) (scope.startIndex2 + i)].note, uiNotes[(size_t) (scope.startIndex2 + i)].velocity);
+        for (int i = 0; i < scope.blockSize1; ++i) handleUi (uiNotes[(size_t) (scope.startIndex1 + i)]);
+        for (int i = 0; i < scope.blockSize2; ++i) handleUi (uiNotes[(size_t) (scope.startIndex2 + i)]);
     }
 
     auto render = [&] (int from, int to) { renderWithModulation (buffer, from, to); };
@@ -187,7 +187,11 @@ void NeuroMPCProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
         const auto msg = meta.getMessage();
 
         if (msg.isNoteOn())
+        {
+            lastMidiNote.store (msg.getNoteNumber());
+            midiNoteCount.fetch_add (1);
             handle (msg.getNoteNumber(), msg.getFloatVelocity());
+        }
         else if (msg.isNoteOff())
             handle (msg.getNoteNumber(), 0.0f);
         else if (msg.isPitchWheel())
@@ -296,6 +300,13 @@ void NeuroMPCProcessor::editSlices (const std::function<void (neuro::SliceSet&)>
 void NeuroMPCProcessor::publishSlices()
 {
     rtSlices.publish (std::make_shared<const neuro::SliceSet> (slices));
+
+    if (pads.followSlices)
+    {
+        pads.autoAssign (slices);
+        publishPads();
+    }
+
     refreshStretch();
     refreshAnalysis();
     updateKeyboardMap();
@@ -329,18 +340,39 @@ void NeuroMPCProcessor::updateKeyboardMap()
 
 int NeuroMPCProcessor::padNote (int padIndex) const
 {
-    // Keys mode: pads play the keyboard slice chromatically upwards from its root.
-    return isKeyboardMode() ? juce::jlimit (0, 127, juce::roundToInt (keyboardRootNote.load()) + padIndex)
-                            : neuro::VoiceEngine::baseNote + padIndex;
+    // Keys mode: pads play the keyboard slice chromatically upwards from its root (per bank of 16).
+    return isKeyboardMode() ? juce::jlimit (0, 127, juce::roundToInt (keyboardRootNote.load()) + padIndex % neuro::padsPerBank)
+                            : pads[juce::jlimit (0, neuro::numPads - 1, padIndex)].note;
 }
 
-int NeuroMPCProcessor::auditionNote (int sliceIndex)
+int NeuroMPCProcessor::startSliceAudition (int sliceIndex, float velocity)
 {
-    if (! isKeyboardMode())
-        return neuro::VoiceEngine::baseNote + sliceIndex;
+    if (isKeyboardMode())
+    {
+        setKeyboardSlice (sliceIndex);
+        const auto note = juce::jlimit (0, 127, juce::roundToInt (keyboardRootNote.load()));
+        pushUiNote (note, velocity, -1);
+        return note;
+    }
 
-    setKeyboardSlice (sliceIndex);
-    return juce::jlimit (0, 127, juce::roundToInt (keyboardRootNote.load()));
+    pushUiNote (sliceAuditionTag + sliceIndex, velocity, sliceIndex);
+    return sliceAuditionTag + sliceIndex;
+}
+
+void NeuroMPCProcessor::stopAudition (int tag)
+{
+    pushUiNote (tag, 0.0f, -1);
+}
+
+void NeuroMPCProcessor::editPads (const std::function<void (neuro::PadBank&)>& edit)
+{
+    edit (pads);
+    publishPads();
+}
+
+void NeuroMPCProcessor::publishPads()
+{
+    rtPads.publish (std::make_shared<const neuro::PadMap> (pads.playMap()));
 }
 
 void NeuroMPCProcessor::refreshAnalysis()
@@ -501,12 +533,17 @@ NeuroMPCProcessor::StretchStatus NeuroMPCProcessor::getStretchStatus (int sliceI
 
 void NeuroMPCProcessor::auditionNote (int note, float velocity)
 {
+    pushUiNote (note, velocity, -1);
+}
+
+void NeuroMPCProcessor::pushUiNote (int note, float velocity, int slice)
+{
     const auto scope = uiFifo.write (1);
 
     if (scope.blockSize1 > 0)
-        uiNotes[(size_t) scope.startIndex1] = { note, velocity };
+        uiNotes[(size_t) scope.startIndex1] = { note, velocity, slice };
     else if (scope.blockSize2 > 0)
-        uiNotes[(size_t) scope.startIndex2] = { note, velocity };
+        uiNotes[(size_t) scope.startIndex2] = { note, velocity, slice };
 }
 
 void NeuroMPCProcessor::getStateInformation (juce::MemoryBlock& dest)
@@ -541,6 +578,26 @@ void NeuroMPCProcessor::getStateInformation (juce::MemoryBlock& dest)
 
     root.appendChild (sliceTree, nullptr);
 
+    juce::ValueTree padTree ("PADS");
+    padTree.setProperty ("followSlices", pads.followSlices, nullptr);
+
+    for (int i = 0; i < neuro::numPads; ++i)
+    {
+        const auto& p = pads[i];
+        juce::ValueTree t ("PAD");
+        t.setProperty ("slice", p.sliceId, nullptr);
+        t.setProperty ("note", p.note, nullptr);
+        t.setProperty ("gain", p.gain, nullptr);
+        t.setProperty ("pitch", p.pitch, nullptr);
+        t.setProperty ("choke", p.chokeGroup, nullptr);
+        t.setProperty ("velSens", p.velocitySensitivity, nullptr);
+        t.setProperty ("name", juce::String (p.name), nullptr);
+        t.setProperty ("colour", juce::String::toHexString ((juce::int64) p.colour), nullptr);
+        padTree.appendChild (t, nullptr);
+    }
+
+    root.appendChild (padTree, nullptr);
+
     if (auto xml = root.createXml())
         copyXmlToBinary (*xml, dest);
 }
@@ -558,6 +615,29 @@ void NeuroMPCProcessor::setStateInformation (const void* data, int size)
         apvts.replaceState (params);
 
     keyboardSlice = root.getProperty ("keyboardSlice", 0);
+
+    // Pads are restored before slices are published, so followSlices sees the saved choice.
+    if (auto padTree = root.getChildWithName ("PADS"); padTree.isValid())
+    {
+        pads = {};
+        pads.followSlices = padTree.getProperty ("followSlices", true);
+
+        for (int i = 0; i < juce::jmin (neuro::numPads, padTree.getNumChildren()); ++i)
+        {
+            const auto t = padTree.getChild (i);
+            auto& p = pads[i];
+            p.sliceId = t.getProperty ("slice", 0);
+            p.note = juce::jlimit (0, 127, (int) t.getProperty ("note", neuro::PadBank::baseNote + i));
+            p.gain = juce::jlimit (0.0f, 4.0f, (float) t.getProperty ("gain", 1.0f));
+            p.pitch = juce::jlimit (-24.0f, 24.0f, (float) t.getProperty ("pitch", 0.0f));
+            p.chokeGroup = juce::jlimit (0, 16, (int) t.getProperty ("choke", 0));
+            p.velocitySensitivity = juce::jlimit (0.0f, 1.0f, (float) t.getProperty ("velSens", 1.0f));
+            p.name = t.getProperty ("name", "").toString().toStdString();
+            p.colour = (uint32_t) t.getProperty ("colour", "ff2a2f3a").toString().getHexValue64();
+        }
+
+        publishPads();
+    }
 
     const auto path = root.getChildWithName ("SAMPLE")["path"].toString();
 

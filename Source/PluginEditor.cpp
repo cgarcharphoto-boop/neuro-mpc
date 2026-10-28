@@ -52,28 +52,48 @@ namespace
 
 void NeuroMPCEditor::Pad::paint (juce::Graphics& g)
 {
-    const auto sliceCount = proc.getSlices().size();
-    const auto assigned = proc.getSample() != nullptr && index < sliceCount;
+    auto& processor = editor.proc;
+    const auto p = padIndex();
+    const auto& def = processor.getPads()[p];
+    const auto keys = processor.isKeyboardMode();
+    const auto sliceIndex = def.sliceId > 0 ? processor.getSlices().indexOfId (def.sliceId) : -1;
+    const auto assigned = processor.getSample() != nullptr && (keys || sliceIndex >= 0);
     auto r = getLocalBounds().toFloat().reduced (3.0f);
 
-    g.setColour (lit ? accent : (assigned ? panel.brighter (0.25f) : panel));
+    g.setColour (lit ? accent : (assigned ? juce::Colour (def.colour).brighter (0.25f) : panel));
     g.fillRoundedRectangle (r, 6.0f);
+
+    if (p == editor.selectedPad)
+    {
+        g.setColour (accent);
+        g.drawRoundedRectangle (r, 6.0f, 2.0f);
+    }
+
+    const auto label = keys ? juce::String ("KEY")
+                     : ! def.name.empty() ? juce::String (def.name)
+                     : sliceIndex >= 0 ? "S" + juce::String (sliceIndex + 1) : juce::String ("empty");
+
     g.setColour (lit ? juce::Colours::black : juce::Colours::white.withAlpha (assigned ? 0.85f : 0.3f));
-    g.setFont (12.0f);
-    g.drawFittedText ("PAD " + juce::String (index + 1) + "\n"
-                          + juce::MidiMessage::getMidiNoteName (proc.padNote (index), true, true, 3),
-                      r.toNearestInt(), juce::Justification::centred, 2);
+    g.setFont (11.0f);
+    g.drawFittedText (juce::String::charToString ((juce::juce_wchar) ('A' + p / neuro::padsPerBank)) + juce::String (p % neuro::padsPerBank + 1)
+                          + "\n" + label + "\n" + juce::MidiMessage::getMidiNoteName (processor.padNote (p), true, true, 3),
+                      r.toNearestInt(), juce::Justification::centred, 3);
 }
 
 void NeuroMPCEditor::Pad::mouseDown (const juce::MouseEvent& e)
 {
     auto velocity = 1.0f - 0.7f * (float) e.y / (float) juce::jmax (1, getHeight());
-    proc.auditionNote (proc.padNote (index), velocity);
+    heldNote = editor.proc.padNote (padIndex());
+    editor.proc.auditionNote (heldNote, velocity);
+    editor.selectPad (padIndex());
 }
 
 void NeuroMPCEditor::Pad::mouseUp (const juce::MouseEvent&)
 {
-    proc.auditionNote (proc.padNote (index), 0.0f);
+    if (heldNote >= 0)
+        editor.proc.auditionNote (heldNote, 0.0f);
+
+    heldNote = -1;
 }
 
 NeuroMPCEditor::NeuroMPCEditor (NeuroMPCProcessor& p) : AudioProcessorEditor (p), proc (p)
@@ -131,7 +151,119 @@ NeuroMPCEditor::NeuroMPCEditor (NeuroMPCProcessor& p) : AudioProcessorEditor (p)
     };
 
     for (int i = 0; i < numPads; ++i)
-        addAndMakeVisible (*pads.emplace_back (std::make_unique<Pad> (proc, i)));
+        addAndMakeVisible (*pads.emplace_back (std::make_unique<Pad> (*this, i)));
+
+    for (int b = 0; b < neuro::numBanks; ++b)
+    {
+        auto& button = bankButtons[(size_t) b];
+        button.setButtonText (juce::String::charToString ((juce::juce_wchar) ('A' + b)));
+        button.setRadioGroupId (1);
+        button.setClickingTogglesState (true);
+        button.setColour (juce::TextButton::buttonOnColourId, accent);
+        button.onClick = [this, b] { currentBank = b; selectPad (b * neuro::padsPerBank + selectedPad % neuro::padsPerBank); };
+        addAndMakeVisible (button);
+    }
+
+    bankButtons[0].setToggleState (true, juce::dontSendNotification);
+
+    for (auto* tab : { &sliceTab, &padTab })
+    {
+        tab->setRadioGroupId (2);
+        tab->setClickingTogglesState (true);
+        tab->setColour (juce::TextButton::buttonOnColourId, accent.darker (0.3f));
+        addAndMakeVisible (tab);
+    }
+
+    sliceTab.onClick = [this] { showPadPanel (false); };
+    padTab.onClick   = [this] { showPadPanel (true); };
+    waveform.onSliceClicked = [this] { showPadPanel (false); };
+
+    // ---- Pad panel ----
+    for (auto* c : padPanelComponents())
+        addAndMakeVisible (c);
+
+    padTitle.setFont (juce::FontOptions (14.0f, juce::Font::bold));
+    padName.setEditable (true);
+    padName.setColour (juce::Label::outlineColourId, panel.brighter (0.3f));
+    padName.setTooltip ("Pad name (double-click to edit)");
+    padName.onTextChange = [this] { editSelectedPad ([t = padName.getText().toStdString()] (auto& d) { d.name = t; }); };
+
+    padSlice.onChange = [this]
+    {
+        const auto id = padSlice.getSelectedId();
+        const auto& sl = proc.getSlices().getSlices();
+        const auto sliceId = id >= 2 && id - 2 < (int) sl.size() ? sl[(size_t) id - 2].id : 0;
+        proc.editPads ([this, sliceId] (auto& bank) { bank.assign (selectedPad, sliceId); });
+    };
+
+    for (int note = 0; note < 128; ++note)
+        padNote.addItem (juce::MidiMessage::getMidiNoteName (note, true, true, 3) + " (" + juce::String (note) + ")", note + 1);
+
+    padNote.setTooltip ("MIDI note that triggers this pad (several pads may share a note to layer)");
+    padNote.onChange = [this] { editSelectedPad ([n = padNote.getSelectedId() - 1] (auto& d) { d.note = n; }); };
+
+    padChoke.addItem ("No choke", 1);
+
+    for (int c = 1; c <= 16; ++c)
+        padChoke.addItem ("Choke " + juce::String (c), c + 1);
+
+    padChoke.setTooltip ("Pads in the same choke group cut each other off (e.g. open/closed hi-hat)");
+    padChoke.onChange = [this] { editSelectedPad ([c = padChoke.getSelectedId() - 1] (auto& d) { d.chokeGroup = c; }); };
+
+    padGain.setRange (-48.0, 12.0, 0.1);
+    padGain.setTextValueSuffix (" dB");
+    padGain.onValueChange = [this] { editSelectedPad ([v = (float) padGain.getValue()] (auto& d) { d.gain = juce::Decibels::decibelsToGain (v, -48.0f); }); };
+    padPitch.setRange (-24.0, 24.0, 0.01);
+    padPitch.setTextValueSuffix (" st");
+    padPitch.onValueChange = [this] { editSelectedPad ([v = (float) padPitch.getValue()] (auto& d) { d.pitch = v; }); };
+    padVelocity.setRange (0.0, 1.0, 0.01);
+    padVelocity.setTooltip ("Velocity sensitivity: 0 = always full level, 1 = level follows velocity");
+    padVelocity.onValueChange = [this] { editSelectedPad ([v = (float) padVelocity.getValue()] (auto& d) { d.velocitySensitivity = v; }); };
+
+    for (auto [slider, name] : { std::pair { &padGain, "Level" }, { &padPitch, "Tune" }, { &padVelocity, "Vel" } })
+    {
+        slider->setTextBoxStyle (juce::Slider::TextBoxRight, false, 62, 20);
+        auto label = std::make_unique<juce::Label> (name, name);
+        label->setFont (juce::FontOptions (11.0f));
+        label->attachToComponent (slider, true);
+        knobLabels.push_back (std::move (label));
+    }
+
+    padLearn.setClickingTogglesState (true);
+    padLearn.setColour (juce::TextButton::buttonOnColourId, accent);
+    padLearn.setTooltip ("Assign the next incoming MIDI note to this pad");
+    padLearn.onClick = [this] { learnBaseline = padLearn.getToggleState() ? proc.getMidiNoteCount() : -1; };
+
+    padColour.onClick = [this]
+    {
+        static constexpr uint32_t palette[] { 0xff2a2f3a, 0xffc0392b, 0xffd35400, 0xfff1c40f, 0xff27ae60, 0xff16a085, 0xff2980b9, 0xff8e44ad };
+        const auto current = proc.getPads()[selectedPad].colour;
+        auto next = palette[0];
+
+        for (size_t i = 0; i < std::size (palette); ++i)
+            if (palette[i] == current)
+                next = palette[(i + 1) % std::size (palette)];
+
+        editSelectedPad ([next] (auto& d) { d.colour = next; });
+    };
+
+    padCopy.onClick      = [this] { copiedPad = selectedPad; };
+    padPaste.onClick     = [this] { if (copiedPad >= 0) proc.editPads ([this] (auto& b) { b.copy (copiedPad, selectedPad); }); };
+    padDuplicate.onClick = [this]
+    {
+        int target = -1;
+        proc.editPads ([this, &target] (auto& b) { target = b.duplicate (selectedPad); });
+
+        if (target >= 0)
+        {
+            currentBank = target / neuro::padsPerBank;
+            bankButtons[(size_t) currentBank].setToggleState (true, juce::dontSendNotification);
+            selectPad (target);
+        }
+    };
+    padClear.onClick      = [this] { proc.editPads ([this] (auto& b) { b.clear (selectedPad); }); };
+    padAutoAssign.onClick = [this] { proc.editPads ([this] (auto& b) { b.followSlices = true; b.autoAssign (proc.getSlices()); }); };
+    padAutoAssign.setTooltip ("Pad n plays slice n, and keeps following slice edits until a pad is assigned by hand");
 
     sensitivity.setRange (0.0, 1.0);
     sensitivity.setValue (0.6, juce::dontSendNotification);
@@ -251,6 +383,7 @@ NeuroMPCEditor::NeuroMPCEditor (NeuroMPCProcessor& p) : AudioProcessorEditor (p)
     info.setColour (juce::Label::textColourId, juce::Colours::white.withAlpha (0.7f));
     info.setJustificationType (juce::Justification::topLeft);
 
+    showPadPanel (false);
     setResizable (true, true);
     setResizeLimits (1000, 700, 2400, 1600);
     setSize (1120, 760);
@@ -315,6 +448,97 @@ void NeuroMPCEditor::setSelectedStretch (float ratio, bool allSlices)
     });
 
     updateSlicePanel();
+}
+
+std::vector<juce::Component*> NeuroMPCEditor::slicePanelComponents()
+{
+    std::vector<juce::Component*> list { &sliceTitle, &durationInfo, &targetSeconds, &stretch, &halfButton, &doubleButton,
+                                         &resetButton, &allButton, &preserveTransients, &pitchInfo, &rootNote, &octaveDown,
+                                         &octaveUp, &semitoneInfo, &fineCents, &pitchMode };
+
+    for (auto& b : noteButtons)
+        list.push_back (&b);
+
+    return list;
+}
+
+std::vector<juce::Component*> NeuroMPCEditor::padPanelComponents()
+{
+    return { &padTitle, &padName, &padSlice, &padNote, &padChoke, &padGain, &padPitch, &padVelocity, &padLearn,
+             &padColour, &padCopy, &padPaste, &padDuplicate, &padClear, &padAutoAssign };
+}
+
+void NeuroMPCEditor::showPadPanel (bool pad)
+{
+    showingPad = pad;
+
+    for (auto* c : slicePanelComponents())
+        c->setVisible (! pad);
+
+    for (auto* c : padPanelComponents())
+        c->setVisible (pad);
+
+    sliceTab.setToggleState (! pad, juce::dontSendNotification);
+    padTab.setToggleState (pad, juce::dontSendNotification);
+
+    if (pad)
+        updatePadPanel();
+}
+
+void NeuroMPCEditor::selectPad (int padIndex)
+{
+    selectedPad = juce::jlimit (0, neuro::numPads - 1, padIndex);
+    const auto sliceId = proc.getPads()[selectedPad].sliceId;
+
+    if (const auto index = proc.getSlices().indexOfId (sliceId); index >= 0 && sliceId > 0)
+        waveform.setSelectedSlice (index);
+
+    showPadPanel (true);
+
+    for (auto& p : pads)
+        p->repaint();
+}
+
+void NeuroMPCEditor::editSelectedPad (const std::function<void (neuro::PadDefinition&)>& edit)
+{
+    proc.editPads ([this, &edit] (auto& bank) { edit (bank[selectedPad]); });
+}
+
+void NeuroMPCEditor::updatePadPanel()
+{
+    const auto& bank = proc.getPads();
+    const auto& def = bank[selectedPad];
+    const auto& sl = proc.getSlices();
+
+    padTitle.setText ("PAD " + juce::String::charToString ((juce::juce_wchar) ('A' + selectedPad / neuro::padsPerBank))
+                          + juce::String (selectedPad % neuro::padsPerBank + 1)
+                          + (bank.followSlices ? "   following slices" : "   custom map"),
+                      juce::dontSendNotification);
+
+    if (! padName.isBeingEdited())
+        padName.setText (def.name, juce::dontSendNotification);
+
+    if (shownSliceCount != sl.size())
+    {
+        shownSliceCount = sl.size();
+        padSlice.clear (juce::dontSendNotification);
+        padSlice.addItem ("Empty", 1);
+
+        for (int i = 0; i < sl.size(); ++i)
+            padSlice.addItem ("Slice " + juce::String (i + 1), i + 2);
+    }
+
+    const auto index = def.sliceId > 0 ? sl.indexOfId (def.sliceId) : -1;
+    padSlice.setSelectedId (index >= 0 ? index + 2 : 1, juce::dontSendNotification);
+    padNote.setSelectedId (def.note + 1, juce::dontSendNotification);
+    padChoke.setSelectedId (def.chokeGroup + 1, juce::dontSendNotification);
+
+    if (! padGain.isMouseButtonDown())     padGain.setValue (juce::Decibels::gainToDecibels (def.gain, -48.0f), juce::dontSendNotification);
+    if (! padPitch.isMouseButtonDown())    padPitch.setValue (def.pitch, juce::dontSendNotification);
+    if (! padVelocity.isMouseButtonDown()) padVelocity.setValue (def.velocitySensitivity, juce::dontSendNotification);
+
+    padLearn.setToggleState (learnBaseline >= 0, juce::dontSendNotification);
+    padPaste.setEnabled (copiedPad >= 0 && copiedPad != selectedPad);
 }
 
 float NeuroMPCEditor::selectedRoot() const
@@ -409,17 +633,26 @@ void NeuroMPCEditor::timerCallback()
         waveform.sampleChanged();
     }
 
+    // MIDI learn: the first note-on after Learn was pressed becomes the pad's note.
+    if (learnBaseline >= 0 && proc.getMidiNoteCount() != learnBaseline)
+    {
+        const auto note = proc.getLastMidiNote();
+        learnBaseline = -1;
+        editSelectedPad ([note] (auto& d) { d.note = note; });
+    }
+
     const auto playhead = proc.getPlayhead();
     const auto playing = playhead >= 0 ? proc.getSlices().indexAt (playhead) : -1;
+    const auto playingId = playing >= 0 ? proc.getSlices().getSlices()[(size_t) playing].id : 0;
 
     for (auto& pad : pads)
     {
-        if (pad->lit != (pad->index == playing))
-        {
-            pad->lit = pad->index == playing;
-            pad->repaint();
-        }
+        pad->lit = ! proc.isKeyboardMode() && playingId > 0 && proc.getPads()[pad->padIndex()].sliceId == playingId;
+        pad->repaint();
     }
+
+    if (showingPad)
+        updatePadPanel();
 
     updateInfo();
     updateSlicePanel();
@@ -461,8 +694,17 @@ void NeuroMPCEditor::resized()
     auto bottom = area.removeFromBottom (juce::jmin (400, area.getHeight() * 3 / 5));
     waveform.setBounds (area.withTrimmedBottom (8));
 
-    // Pads, bottom row = pad 1 as on MPC hardware.
-    auto padArea = bottom.removeFromLeft (juce::jmin (300, bottom.getHeight())).removeFromBottom (300).toFloat();
+    // Bank selector over the pads; bottom row = pad 1 as on MPC hardware.
+    auto padColumn = bottom.removeFromLeft (juce::jmin (300, bottom.getHeight() - 26));
+    auto bankRow = padColumn.removeFromTop (22);
+
+    const auto bankWidth = bankRow.getWidth() / neuro::numBanks;
+
+    for (auto& b : bankButtons)
+        b.setBounds (bankRow.removeFromLeft (bankWidth).reduced (2, 0));
+
+    padColumn.removeFromTop (4);
+    auto padArea = padColumn.removeFromTop (padColumn.getWidth()).toFloat();
     const auto cell = padArea.getWidth() / 4.0f;
 
     for (int i = 0; i < numPads; ++i)
@@ -488,10 +730,51 @@ void NeuroMPCEditor::resized()
         selectors.removeFromLeft (6);
     }
 
-    // Selected slice
-    bottom.removeFromTop (10);
-    sliceTitle.setBounds (bottom.removeFromTop (22));
-    auto row = bottom.removeFromTop (26);
+    // Tabs: selected slice / selected pad share one panel area.
+    bottom.removeFromTop (8);
+    auto tabs = bottom.removeFromTop (24);
+    sliceTab.setBounds (tabs.removeFromLeft (70));
+    padTab.setBounds (tabs.removeFromLeft (70));
+    bottom.removeFromTop (6);
+    const auto panelArea = bottom.removeFromTop (142);
+
+    auto pp = panelArea;
+    auto padRow0 = pp.removeFromTop (22);
+    padTitle.setBounds (padRow0.removeFromLeft (260));
+    padName.setBounds (padRow0.removeFromLeft (160));
+    pp.removeFromTop (6);
+    auto padRow1 = pp.removeFromTop (26);
+
+    for (auto [c, w] : std::initializer_list<std::pair<juce::Component*, int>> { { &padSlice, 110 }, { &padNote, 100 }, { &padLearn, 56 },
+                                                                                 { &padChoke, 100 }, { &padColour, 64 } })
+    {
+        c->setBounds (padRow1.removeFromLeft (w));
+        padRow1.removeFromLeft (6);
+    }
+
+    pp.removeFromTop (6);
+    auto padRow2 = pp.removeFromTop (26);
+    const auto sliderWidth = (padRow2.getWidth() - 3 * 40) / 3;
+
+    for (auto* sld : { &padGain, &padPitch, &padVelocity })
+    {
+        padRow2.removeFromLeft (40); // attached label
+        sld->setBounds (padRow2.removeFromLeft (sliderWidth));
+    }
+
+    pp.removeFromTop (8);
+    auto padRow3 = pp.removeFromTop (26);
+
+    for (auto* b : { &padCopy, &padPaste, &padDuplicate, &padClear, &padAutoAssign })
+    {
+        b->setBounds (padRow3.removeFromLeft (b == &padAutoAssign ? 96 : 76));
+        padRow3.removeFromLeft (6);
+    }
+
+    auto sp = panelArea;
+    auto& bottomPanel = sp; // slice panel rows below
+    sliceTitle.setBounds (bottomPanel.removeFromTop (22));
+    auto row = bottomPanel.removeFromTop (26);
     stretch.setBounds (row.removeFromLeft (juce::jmin (320, row.getWidth() - 220)));
 
     for (auto* b : { &halfButton, &doubleButton, &resetButton })
@@ -503,15 +786,15 @@ void NeuroMPCEditor::resized()
     row.removeFromLeft (4);
     allButton.setBounds (row.removeFromLeft (84));
 
-    bottom.removeFromTop (4);
-    auto row2 = bottom.removeFromTop (24);
+    bottomPanel.removeFromTop (4);
+    auto row2 = bottomPanel.removeFromTop (24);
     targetSeconds.setBounds (row2.removeFromLeft (70));
     row2.removeFromLeft (8);
     preserveTransients.setBounds (row2.removeFromLeft (150));
     durationInfo.setBounds (row2);
 
-    bottom.removeFromTop (4);
-    auto row3 = bottom.removeFromTop (26);
+    bottomPanel.removeFromTop (4);
+    auto row3 = bottomPanel.removeFromTop (26);
 
     for (auto& b : noteButtons)
         b.setBounds (row3.removeFromLeft (30));
@@ -525,8 +808,8 @@ void NeuroMPCEditor::resized()
     row3.removeFromLeft (6);
     pitchMode.setBounds (row3);
 
-    bottom.removeFromTop (4);
-    auto row4 = bottom.removeFromTop (24);
+    bottomPanel.removeFromTop (4);
+    auto row4 = bottomPanel.removeFromTop (24);
     rootNote.setBounds (row4.removeFromLeft (130));
     row4.removeFromLeft (8);
     pitchInfo.setBounds (row4);

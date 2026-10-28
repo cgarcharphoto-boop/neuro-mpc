@@ -60,6 +60,12 @@ public:
     const neuro::SliceSet& getSlices() const noexcept           { return slices; }
     void editSlices (const std::function<void (neuro::SliceSet&)>&);
     void auditionNote (int note, float velocity); // velocity 0 = note-off; lock-free into the audio thread
+
+    // Pads (message thread). editPads publishes the result to the audio thread.
+    const neuro::PadBank& getPads() const noexcept              { return pads; }
+    void editPads (const std::function<void (neuro::PadBank&)>&);
+    int getLastMidiNote() const noexcept                        { return lastMidiNote.load(); } // for MIDI learn
+    int getMidiNoteCount() const noexcept                       { return midiNoteCount.load(); }
     int64_t getPlayhead() const noexcept                        { return engine.getPlayhead(); }
     const juce::String& getMissingSamplePath() const noexcept   { return missingSamplePath; }
 
@@ -76,7 +82,9 @@ public:
     float getKeyboardRoot() const noexcept                      { return keyboardRootNote.load(); }
     bool isKeyboardMode() const noexcept                        { return keyModeParam->load() > 0.5f; }
     int padNote (int padIndex) const;                           // pad -> MIDI note for the current mode
-    int auditionNote (int sliceIndex);                          // plays a slice at its original pitch in either mode
+    // Plays a slice directly (assigned to a pad or not) at its original pitch; returns a tag for stopAudition.
+    int startSliceAudition (int sliceIndex, float velocity = 0.9f);
+    void stopAudition (int tag);
 
     void processBackgroundResults();            // also driven by the internal timer, so it works with the editor closed
     bool waitForBackgroundWork (int timeoutMs); // for tests and offline use
@@ -87,6 +95,8 @@ public:
 private:
     static juce::AudioProcessorValueTreeState::ParameterLayout createLayout();
     void publishSlices();
+    void publishPads();
+    void pushUiNote (int note, float velocity, int slice);
     void refreshStretch();
     void refreshAnalysis();
     void updateKeyboardMap();
@@ -117,7 +127,7 @@ private:
     std::map<int, std::pair<int64_t, int64_t>> analysisRequested;       // id -> requested region
     neuro::VoiceEngine engine;
 
-    struct UiNote { int note; float velocity; };
+    struct UiNote { int note; float velocity; int slice; }; // slice >= 0: direct slice audition tagged `note`
     juce::AbstractFifo uiFifo { 256 };
     std::array<UiNote, 256> uiNotes {};
 
@@ -135,6 +145,11 @@ private:
     float bendSemitones = 0.0f, sampleAndHold = 0.0f;
     double lfoCyclePos = 0.0, lfoIncrement = 0.0;
     juce::Random lfoRandom;
+
+    neuro::PadBank pads;
+    neuro::RtShared<neuro::PadMap> rtPads;
+    std::atomic<int> lastMidiNote { -1 }, midiNoteCount { 0 };
+    static constexpr int sliceAuditionTag = 1000; // note tags above the MIDI range
 
     int keyboardSlice = 0; // message thread
     std::atomic<int> keyboardSliceIndex { 0 };

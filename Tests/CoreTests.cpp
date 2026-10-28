@@ -1,4 +1,5 @@
 #include "Core/KeyDetector.h"
+#include "Core/PadBank.h"
 #include "Core/PitchDetector.h"
 #include "Core/RtShared.h"
 #include "Core/Scales.h"
@@ -286,6 +287,41 @@ static void scaleTests()
     CHECK (s.setPitchMode (0, PitchMode::keepLength) && s.getSlices()[0].needsRender() && s.getSlices()[0].renderedPitch() == -7.5f);
 }
 
+static void padTests()
+{
+    SliceSet slices (10000);
+    slices.grid (4);
+    PadBank pads;
+    CHECK (pads.followSlices && pads[0].note == 36 && pads[63].note == 99);
+
+    pads.autoAssign (slices);
+    CHECK (pads[0].sliceId == slices.getSlices()[0].id && pads[3].sliceId == slices.getSlices()[3].id && pads[4].sliceId == 0);
+
+    // Assignment by id survives slice edits that do not remove the slice.
+    pads.assign (5, slices.getSlices()[2].id);
+    CHECK (! pads.followSlices);
+    const auto id = pads[5].sliceId;
+    slices.split (100);
+    CHECK (slices.indexOfId (id) == 3 && pads[5].sliceId == id);
+
+    // Copy keeps the target's note; duplicate fills the next empty pad.
+    pads[5].gain = 0.5f;
+    pads[5].chokeGroup = 2;
+    pads.copy (5, 6);
+    CHECK (pads[6].sliceId == id && pads[6].gain == 0.5f && pads[6].chokeGroup == 2 && pads[6].note == 42);
+    CHECK (pads.duplicate (6) == 7 && pads[7].sliceId == id && pads[7].note == 43);
+    pads.clear (7);
+    CHECK (pads[7].sliceId == 0 && pads[7].note == 43 && pads[7].gain == 1.0f);
+
+    // Velocity response.
+    PadPlay play;
+    play.gain = 0.5f;
+    CHECK (std::abs (play.levelFor (0.4f) - 0.2f) < 1e-6f);
+    play.velocitySensitivity = 0.0f;
+    CHECK (std::abs (play.levelFor (0.1f) - 0.5f) < 1e-6f);
+    CHECK (pads.playMap()[6].chokeGroup == 2);
+}
+
 static void keyTests()
 {
     auto print = [] (const char* name, const KeyEstimate& k)
@@ -331,6 +367,7 @@ int main()
     rtSharedTests();
     pitchTests();
     scaleTests();
+    padTests();
     keyTests();
     std::printf (failures == 0 ? "All core tests passed\n" : "%d failure(s)\n", failures);
     return failures == 0 ? EXIT_SUCCESS : EXIT_FAILURE;

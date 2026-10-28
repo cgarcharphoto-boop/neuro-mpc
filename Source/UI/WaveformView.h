@@ -12,6 +12,8 @@ public:
 
     void sampleChanged();
     int getSelectedSlice() const noexcept { return selected; }
+    void setSelectedSlice (int index)     { selected = index; repaint(); }
+    std::function<void()> onSliceClicked;
 
     void paint (juce::Graphics&) override;
     void mouseMove (const juce::MouseEvent&) override;

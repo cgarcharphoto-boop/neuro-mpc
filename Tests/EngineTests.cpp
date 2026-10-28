@@ -477,6 +477,76 @@ int main()
 
     CHECK (std::abs (q.apvts.getRawParameterValue (ParamIDs::gain)->load() + 6.0f) < 0.01f);
 
+    // ---- Phase 9: pads ----
+    {
+        writeTestWav (wavFile);
+        NeuroMPCProcessor d;
+        d.prepareToPlay (rate, block);
+        CHECK (d.loadSample (wavFile, error));
+        setParam (d, ParamIDs::attack, 0.0f);
+        d.editSlices ([] (auto& s) { s.grid (4); }); // levels 0.1, 0.2, 0.3, 0.4; pads follow
+        const auto peakOf = [] (const std::vector<float>& x, int from, int to)
+        {
+            float pk = 0.0f;
+            for (int i = from; i < to; ++i) pk = std::max (pk, std::abs (x[(size_t) i]));
+            return pk;
+        };
+
+        CHECK (std::abs (render (d, 30, { { 0, 37, 1.0f } }).peak - 0.2f) < 0.01f); // follow mode: pad 2 = slice 2
+
+        // Custom note + layering: pads A1 and A2 both on note 60 play slices 1 and 2 together.
+        d.editPads ([] (auto& b) { b[0].note = 60; b[1].note = 60; });
+        CHECK (render (d, 30, { { 0, 36, 1.0f } }).nonZero == 0);
+        CHECK (std::abs (render (d, 30, { { 0, 60, 1.0f } }).peak - 0.3f) < 0.01f);
+        d.editPads ([] (auto& b) { b[0].note = 36; b[1].note = 37; });
+
+        // Pad level, velocity sensitivity and tuning.
+        d.editPads ([] (auto& b) { b[0].gain = 0.5f; });
+        CHECK (std::abs (render (d, 30, { { 0, 36, 1.0f } }).peak - 0.05f) < 0.002f);
+        d.editPads ([] (auto& b) { b[0].velocitySensitivity = 0.0f; });
+        CHECK (std::abs (render (d, 30, { { 0, 36, 0.1f } }).peak - 0.05f) < 0.002f);
+        d.editPads ([] (auto& b) { b[0].gain = 1.0f; b[0].velocitySensitivity = 1.0f; b[0].pitch = 12.0f; });
+        CHECK (std::abs (render (d, 30, { { 0, 36, 1.0f } }).nonZero - 6000) <= 2); // +12 st resampled: half length
+        d.editPads ([] (auto& b) { b[0].pitch = 0.0f; });
+
+        // Choke group: pad 2 cuts pad 1 off within the 5 ms choke fade.
+        d.editPads ([] (auto& b) { b[0].chokeGroup = 1; b[1].chokeGroup = 1; });
+        auto x = capture (d, 10, { { 0, 36, 1.0f }, { 2, 37, 1.0f } });
+        std::printf ("  choke: before %.3f, during %.3f, after %.3f\n", peakOf (x, 0, 2 * block), peakOf (x, 2 * block, 2 * block + 240),
+                     peakOf (x, 2 * block + 300, 4 * block));
+        CHECK (std::abs (peakOf (x, 0, 2 * block) - 0.1f) < 0.005f);
+        CHECK (std::abs (peakOf (x, 2 * block + 300, 4 * block) - 0.2f) < 0.005f); // only pad 2 remains
+        d.editPads ([] (auto& b) { b[1].chokeGroup = 0; });
+        x = capture (d, 10, { { 0, 36, 1.0f }, { 2, 37, 1.0f } });
+        CHECK (std::abs (peakOf (x, 2 * block + 300, 4 * block) - 0.3f) < 0.005f); // no choke: both sound
+        d.editPads ([] (auto& b) { b[0].chokeGroup = 0; });
+
+        // Manual assignment stops following; a pad whose slice is removed goes silent; unassigned slices still audition.
+        capture (d, 1, {}); // all-notes-off: flush voices left from the choke captures
+        d.editPads ([&] (auto& b) { b.assign (0, d.getSlices().getSlices()[3].id); });
+        CHECK (std::abs (render (d, 30, { { 0, 36, 1.0f } }).peak - 0.4f) < 0.01f);
+        d.editSlices ([] (auto& s) { s.mergeWithPrevious (3); });
+        CHECK (! d.getPads().followSlices && render (d, 30, { { 0, 36, 1.0f } }).nonZero == 0);
+        d.editPads ([] (auto& b) { b.clear (1); });
+        capture (d, 1, {});
+        const auto tag = d.startSliceAudition (1);
+        CHECK (std::abs (render (d, 60).peak - 0.9f * 0.2f) < 0.01f); // slice 2 is on no pad but auditions (velocity 0.9)
+        d.stopAudition (tag);
+
+        // Pads persist; MIDI learn sees incoming notes.
+        d.editPads ([] (auto& b) { b[4].name = "Kick"; b[4].colour = 0xffc0392b; b[4].chokeGroup = 3; b[4].note = 70; });
+        juce::MemoryBlock st;
+        d.getStateInformation (st);
+        NeuroMPCProcessor e;
+        e.setStateInformation (st.getData(), (int) st.getSize());
+        CHECK (! e.getPads().followSlices && e.getPads()[4].name == "Kick" && e.getPads()[4].colour == 0xffc0392bu);
+        CHECK (e.getPads()[4].chokeGroup == 3 && e.getPads()[4].note == 70 && e.getPads()[0].sliceId == d.getPads()[0].sliceId);
+
+        const auto count = d.getMidiNoteCount();
+        render (d, 1, { { 0, 71, 1.0f } });
+        CHECK (d.getLastMidiNote() == 71 && d.getMidiNoteCount() == count + 1);
+    }
+
     // Missing file on restore is reported, not substituted.
     wavFile.deleteFile();
     NeuroMPCProcessor m;
