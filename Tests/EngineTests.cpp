@@ -547,6 +547,50 @@ int main()
         CHECK (d.getLastMidiNote() == 71 && d.getMidiNoteCount() == count + 1);
     }
 
+    // ---- Phase 10: arpeggiator, end to end through the audio output ----
+    {
+        writeTestWav (wavFile);
+        NeuroMPCProcessor g;
+        g.prepareToPlay (rate, block);
+        CHECK (g.loadSample (wavFile, error));
+        g.editSlices ([] (auto& s) { s.grid (4); }); // pads 36-39 -> levels 0.1 .. 0.4
+        setParam (g, ParamIDs::attack, 0.0f);
+        setParam (g, ParamIDs::playMode, 1.0f);       // gate mode, so arp note lengths are audible
+        setParam (g, ParamIDs::arpOn, 1.0f);          // defaults: Up, 1/16 (6000 samples at 120 BPM), gate 50%
+
+        // Hold three pads (input notes start later than sample 0 to check the phrase starts on the key press).
+        auto x = capture (g, 60, { { 1, 36, 1.0f }, { 1, 37, 1.0f }, { 1, 38, 1.0f } });
+        const int t0 = block; // key press at block 1, sample 0
+        const auto at = [&] (int sample) { return std::abs (x[(size_t) sample]); };
+        std::printf ("  arp levels: %.2f %.2f %.2f %.2f | gap %.3f\n", at (t0 + 1500), at (t0 + 7500), at (t0 + 13500),
+                     at (t0 + 19500), at (t0 + 5500));
+        CHECK (at (t0 - 10) == 0.0f);                        // nothing before the key press
+        CHECK (std::abs (at (t0 + 1500) - 0.1f) < 0.005f);   // step 1: pad 1
+        CHECK (std::abs (at (t0 + 7500) - 0.2f) < 0.005f);   // step 2: pad 2
+        CHECK (std::abs (at (t0 + 13500) - 0.3f) < 0.005f);  // step 3: pad 3
+        CHECK (std::abs (at (t0 + 19500) - 0.1f) < 0.005f);  // wraps to pad 1
+        CHECK (at (t0 + 5500) == 0.0f);                      // gate 50% (3000) + 30 ms release, then silence
+
+        // Releasing the keys stops new steps; switching the arp off releases everything (no stuck notes).
+        x = capture (g, 2, { { 0, 36, 1.0f }, { 0, 37, 1.0f } });
+        setParam (g, ParamIDs::arpOn, 0.0f);
+        x = capture (g, 40, {});
+        CHECK (std::abs (x.back()) == 0.0f && g.getArpHeldCount() == 0);
+
+        // Arp off: notes pass straight through again.
+        CHECK (std::abs (render (g, 2, { { 0, 39, 1.0f } }).peak - 0.4f) < 0.005f);
+
+        // Settings persist as ordinary parameters.
+        setParam (g, ParamIDs::arpDirection, 2.0f);
+        setParam (g, ParamIDs::arpRate, 4.0f);
+        juce::MemoryBlock st;
+        g.getStateInformation (st);
+        NeuroMPCProcessor h;
+        h.setStateInformation (st.getData(), (int) st.getSize());
+        CHECK ((int) h.apvts.getRawParameterValue (ParamIDs::arpDirection)->load() == 2
+               && (int) h.apvts.getRawParameterValue (ParamIDs::arpRate)->load() == 4);
+    }
+
     // Missing file on restore is reported, not substituted.
     wavFile.deleteFile();
     NeuroMPCProcessor m;

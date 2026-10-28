@@ -42,7 +42,10 @@ private:
     void setSelectedPitch (float semitones);
     float selectedRoot() const; // reference for the 12-note selector
     void selectPad (int padIndex);
-    void showPadPanel (bool pad);
+    enum class Panel { slice, pad, arp };
+    void showPanel (Panel);
+    void updateArpPanel();
+    std::vector<juce::Component*> arpPanelComponents();
     void updatePadPanel();
     void editSelectedPad (const std::function<void (neuro::PadDefinition&)>&);
     std::vector<juce::Component*> slicePanelComponents();
@@ -81,9 +84,22 @@ private:
     std::vector<std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment>> comboAttachments;
     std::vector<std::unique_ptr<Pad>> pads;
     std::array<juce::TextButton, neuro::numBanks> bankButtons;
-    juce::TextButton sliceTab { "SLICE" }, padTab { "PAD" };
+    juce::TextButton sliceTab { "SLICE" }, padTab { "PAD" }, arpTab { "ARP" };
     int currentBank = 0, selectedPad = 0, copiedPad = -1, learnBaseline = -1, shownSliceCount = -1;
-    bool showingPad = false;
+    Panel activePanel = Panel::slice;
+
+    // Arpeggiator panel (all controls are host parameters)
+    juce::Label arpTitle, arpActivity;
+    juce::ToggleButton arpOn { "On" }, arpLatch { "Latch" };
+    juce::ComboBox arpDirection, arpRate, arpRetrigger;
+    juce::Slider arpGate { juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight },
+                 arpSwing { juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight },
+                 arpChance { juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight },
+                 arpOctaves { juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight },
+                 arpRepeats { juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight },
+                 arpVelocity { juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight },
+                 arpSeed { juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight };
+    std::vector<std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment>> buttonAttachments;
 
     // Selected-pad panel
     juce::Label padTitle, padName;

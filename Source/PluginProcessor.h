@@ -3,6 +3,7 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <juce_audio_formats/juce_audio_formats.h>
 #include "Audio/VoiceEngine.h"
+#include "Core/Arpeggiator.h"
 #include "Core/RtShared.h"
 #include "DSP/Analysis.h"
 #include "DSP/BackgroundWorker.h"
@@ -24,6 +25,18 @@ namespace ParamIDs
     inline constexpr auto keyMode   = "keyMode";
     inline constexpr auto scale     = "scale";
     inline constexpr auto scaleRoot = "scaleRoot";
+    inline constexpr auto arpOn        = "arpOn";
+    inline constexpr auto arpLatch     = "arpLatch";
+    inline constexpr auto arpDirection = "arpDirection";
+    inline constexpr auto arpRate      = "arpRate";
+    inline constexpr auto arpGate      = "arpGate";
+    inline constexpr auto arpOctaves   = "arpOctaves";
+    inline constexpr auto arpSwing     = "arpSwing";
+    inline constexpr auto arpChance    = "arpProbability";
+    inline constexpr auto arpRepeats   = "arpRepeats";
+    inline constexpr auto arpVelocity  = "arpVelocity";
+    inline constexpr auto arpRetrigger = "arpRetrigger";
+    inline constexpr auto arpSeed      = "arpSeed";
 }
 
 class NeuroMPCProcessor : public juce::AudioProcessor,
@@ -66,6 +79,10 @@ public:
     void editPads (const std::function<void (neuro::PadBank&)>&);
     int getLastMidiNote() const noexcept                        { return lastMidiNote.load(); } // for MIDI learn
     int getMidiNoteCount() const noexcept                       { return midiNoteCount.load(); }
+
+    // Arpeggiator live activity for the UI.
+    int getArpLastNote() const noexcept                         { return arpLastNote.load(); }
+    int getArpHeldCount() const noexcept                        { return arpHeldCount.load(); }
     int64_t getPlayhead() const noexcept                        { return engine.getPlayhead(); }
     const juce::String& getMissingSamplePath() const noexcept   { return missingSamplePath; }
 
@@ -101,6 +118,7 @@ private:
     void refreshAnalysis();
     void updateKeyboardMap();
     void renderWithModulation (juce::AudioBuffer<float>&, int from, int to);
+    void updateArpSettings();
     void timerCallback() override { processBackgroundResults(); }
 
     std::shared_ptr<const neuro::SampleData> sample;
@@ -145,6 +163,21 @@ private:
     float bendSemitones = 0.0f, sampleAndHold = 0.0f;
     double lfoCyclePos = 0.0, lfoIncrement = 0.0;
     juce::Random lfoRandom;
+
+    // Audio-thread arpeggiator and the block's sorted event list (fixed capacity: no allocation).
+    struct Event
+    {
+        enum Type { noteOff, control, noteOn };
+        int offset; Type type; int note; float value; int slice;
+    };
+    neuro::Arpeggiator arp;
+    std::array<Event, 1024> events {};
+    double freeBeatOrigin = 0.0;
+    bool arpWasOn = false, arpWasPlaying = false;
+    std::atomic<int> arpLastNote { -1 }, arpHeldCount { 0 };
+    std::atomic<float> *arpOnParam = nullptr, *arpLatchParam = nullptr, *arpDirectionParam = nullptr, *arpRateParam = nullptr,
+                       *arpGateParam = nullptr, *arpOctavesParam = nullptr, *arpSwingParam = nullptr, *arpChanceParam = nullptr,
+                       *arpRepeatsParam = nullptr, *arpVelocityParam = nullptr, *arpRetriggerParam = nullptr, *arpSeedParam = nullptr;
 
     neuro::PadBank pads;
     neuro::RtShared<neuro::PadMap> rtPads;

@@ -166,7 +166,7 @@ NeuroMPCEditor::NeuroMPCEditor (NeuroMPCProcessor& p) : AudioProcessorEditor (p)
 
     bankButtons[0].setToggleState (true, juce::dontSendNotification);
 
-    for (auto* tab : { &sliceTab, &padTab })
+    for (auto* tab : { &sliceTab, &padTab, &arpTab })
     {
         tab->setRadioGroupId (2);
         tab->setClickingTogglesState (true);
@@ -174,9 +174,43 @@ NeuroMPCEditor::NeuroMPCEditor (NeuroMPCProcessor& p) : AudioProcessorEditor (p)
         addAndMakeVisible (tab);
     }
 
-    sliceTab.onClick = [this] { showPadPanel (false); };
-    padTab.onClick   = [this] { showPadPanel (true); };
-    waveform.onSliceClicked = [this] { showPadPanel (false); };
+    sliceTab.onClick = [this] { showPanel (Panel::slice); };
+    padTab.onClick   = [this] { showPanel (Panel::pad); };
+    arpTab.onClick   = [this] { showPanel (Panel::arp); };
+    waveform.onSliceClicked = [this] { if (activePanel != Panel::arp) showPanel (Panel::slice); };
+
+    // ---- Arp panel ----
+    for (auto* c : arpPanelComponents())
+        addAndMakeVisible (c);
+
+    arpTitle.setText ("ARPEGGIATOR", juce::dontSendNotification);
+    arpTitle.setFont (juce::FontOptions (14.0f, juce::Font::bold));
+    arpDirection.addItemList ({ "Up", "Down", "Up-Down", "Down-Up", "As played", "Reverse played", "Random",
+                                "Random (no repeat)", "Chord", "Octave cycle" }, 1);
+    arpRate.addItemList ({ "1/1", "1/2", "1/4", "1/4T", "1/8", "1/8T", "1/16", "1/16T", "1/32" }, 1);
+    arpRetrigger.addItemList ({ "Retrig: off", "Retrig: first note", "Retrig: every note" }, 1);
+    arpOn.setTooltip ("Arpeggiate held notes and pads (sample-accurate; follows host tempo and transport)");
+    arpLatch.setTooltip ("Keep playing after keys are released, until a new chord is played");
+
+    for (auto [box, id] : std::initializer_list<std::pair<juce::ComboBox*, const char*>> {
+             { &arpDirection, ParamIDs::arpDirection }, { &arpRate, ParamIDs::arpRate }, { &arpRetrigger, ParamIDs::arpRetrigger } })
+        comboAttachments.push_back (std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment> (proc.apvts, id, *box));
+
+    for (auto [button, id] : std::initializer_list<std::pair<juce::Button*, const char*>> { { &arpOn, ParamIDs::arpOn }, { &arpLatch, ParamIDs::arpLatch } })
+        buttonAttachments.push_back (std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (proc.apvts, id, *button));
+
+    for (auto [slider, id, name] : std::initializer_list<std::tuple<juce::Slider*, const char*, const char*>> {
+             { &arpGate, ParamIDs::arpGate, "Gate" }, { &arpSwing, ParamIDs::arpSwing, "Swing" }, { &arpChance, ParamIDs::arpChance, "Chance" },
+             { &arpOctaves, ParamIDs::arpOctaves, "Octaves" }, { &arpRepeats, ParamIDs::arpRepeats, "Repeat" },
+             { &arpVelocity, ParamIDs::arpVelocity, "Velocity" }, { &arpSeed, ParamIDs::arpSeed, "Seed" } })
+    {
+        slider->setTextBoxStyle (juce::Slider::TextBoxRight, false, 66, 20);
+        sliderAttachments.push_back (std::make_unique<SliderAttachment> (proc.apvts, id, *slider));
+        auto label = std::make_unique<juce::Label> (name, name);
+        label->setFont (juce::FontOptions (11.0f));
+        label->attachToComponent (slider, true);
+        knobLabels.push_back (std::move (label));
+    }
 
     // ---- Pad panel ----
     for (auto* c : padPanelComponents())
@@ -383,7 +417,7 @@ NeuroMPCEditor::NeuroMPCEditor (NeuroMPCProcessor& p) : AudioProcessorEditor (p)
     info.setColour (juce::Label::textColourId, juce::Colours::white.withAlpha (0.7f));
     info.setJustificationType (juce::Justification::topLeft);
 
-    showPadPanel (false);
+    showPanel (Panel::slice);
     setResizable (true, true);
     setResizeLimits (1000, 700, 2400, 1600);
     setSize (1120, 760);
@@ -468,21 +502,35 @@ std::vector<juce::Component*> NeuroMPCEditor::padPanelComponents()
              &padColour, &padCopy, &padPaste, &padDuplicate, &padClear, &padAutoAssign };
 }
 
-void NeuroMPCEditor::showPadPanel (bool pad)
+std::vector<juce::Component*> NeuroMPCEditor::arpPanelComponents()
 {
-    showingPad = pad;
+    return { &arpTitle, &arpActivity, &arpOn, &arpLatch, &arpDirection, &arpRate, &arpRetrigger, &arpGate, &arpSwing,
+             &arpChance, &arpOctaves, &arpRepeats, &arpVelocity, &arpSeed };
+}
 
-    for (auto* c : slicePanelComponents())
-        c->setVisible (! pad);
+void NeuroMPCEditor::showPanel (Panel p)
+{
+    activePanel = p;
 
-    for (auto* c : padPanelComponents())
-        c->setVisible (pad);
+    for (auto* c : slicePanelComponents()) c->setVisible (p == Panel::slice);
+    for (auto* c : padPanelComponents())   c->setVisible (p == Panel::pad);
+    for (auto* c : arpPanelComponents())   c->setVisible (p == Panel::arp);
 
-    sliceTab.setToggleState (! pad, juce::dontSendNotification);
-    padTab.setToggleState (pad, juce::dontSendNotification);
+    sliceTab.setToggleState (p == Panel::slice, juce::dontSendNotification);
+    padTab.setToggleState (p == Panel::pad, juce::dontSendNotification);
+    arpTab.setToggleState (p == Panel::arp, juce::dontSendNotification);
 
-    if (pad)
-        updatePadPanel();
+    if (p == Panel::pad) updatePadPanel();
+    if (p == Panel::arp) updateArpPanel();
+}
+
+void NeuroMPCEditor::updateArpPanel()
+{
+    const auto note = proc.getArpLastNote();
+    const auto held = proc.getArpHeldCount();
+    arpActivity.setText (held > 0 ? juce::String (held) + " held   last: " + juce::MidiMessage::getMidiNoteName (note, true, true, 3)
+                                  : juce::String ("no notes held"),
+                         juce::dontSendNotification);
 }
 
 void NeuroMPCEditor::selectPad (int padIndex)
@@ -493,7 +541,8 @@ void NeuroMPCEditor::selectPad (int padIndex)
     if (const auto index = proc.getSlices().indexOfId (sliceId); index >= 0 && sliceId > 0)
         waveform.setSelectedSlice (index);
 
-    showPadPanel (true);
+    if (activePanel != Panel::arp)
+        showPanel (Panel::pad);
 
     for (auto& p : pads)
         p->repaint();
@@ -651,8 +700,8 @@ void NeuroMPCEditor::timerCallback()
         pad->repaint();
     }
 
-    if (showingPad)
-        updatePadPanel();
+    if (activePanel == Panel::pad) updatePadPanel();
+    if (activePanel == Panel::arp) updateArpPanel();
 
     updateInfo();
     updateSlicePanel();
@@ -735,6 +784,7 @@ void NeuroMPCEditor::resized()
     auto tabs = bottom.removeFromTop (24);
     sliceTab.setBounds (tabs.removeFromLeft (70));
     padTab.setBounds (tabs.removeFromLeft (70));
+    arpTab.setBounds (tabs.removeFromLeft (70));
     bottom.removeFromTop (6);
     const auto panelArea = bottom.removeFromTop (142);
 
@@ -769,6 +819,38 @@ void NeuroMPCEditor::resized()
     {
         b->setBounds (padRow3.removeFromLeft (b == &padAutoAssign ? 96 : 76));
         padRow3.removeFromLeft (6);
+    }
+
+    auto ap = panelArea;
+    auto arpRow0 = ap.removeFromTop (22);
+    arpTitle.setBounds (arpRow0.removeFromLeft (130));
+    arpOn.setBounds (arpRow0.removeFromLeft (60));
+    arpLatch.setBounds (arpRow0.removeFromLeft (80));
+    arpActivity.setBounds (arpRow0);
+    ap.removeFromTop (6);
+    auto arpRow1 = ap.removeFromTop (24);
+
+    for (auto [box, w] : { std::pair { &arpDirection, 160 }, { &arpRate, 80 }, { &arpRetrigger, 160 } })
+    {
+        box->setBounds (arpRow1.removeFromLeft (w));
+        arpRow1.removeFromLeft (6);
+    }
+
+    for (auto row : { std::array<juce::Slider*, 4> { &arpGate, &arpSwing, &arpChance, nullptr },
+                      std::array<juce::Slider*, 4> { &arpOctaves, &arpRepeats, &arpVelocity, &arpSeed } })
+    {
+        ap.removeFromTop (8);
+        auto r = ap.removeFromTop (24);
+        const auto cellWidth = (r.getWidth() - 4 * 56) / 4;
+
+        for (auto* sld : row)
+        {
+            r.removeFromLeft (56); // attached label
+            auto slot = r.removeFromLeft (cellWidth);
+
+            if (sld != nullptr)
+                sld->setBounds (slot);
+        }
     }
 
     auto sp = panelArea;

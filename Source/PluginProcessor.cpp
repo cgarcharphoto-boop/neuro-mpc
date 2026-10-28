@@ -28,6 +28,18 @@ NeuroMPCProcessor::NeuroMPCProcessor()
     keyModeParam   = apvts.getRawParameterValue (ParamIDs::keyMode);
     scaleParam     = apvts.getRawParameterValue (ParamIDs::scale);
     scaleRootParam = apvts.getRawParameterValue (ParamIDs::scaleRoot);
+    arpOnParam        = apvts.getRawParameterValue (ParamIDs::arpOn);
+    arpLatchParam     = apvts.getRawParameterValue (ParamIDs::arpLatch);
+    arpDirectionParam = apvts.getRawParameterValue (ParamIDs::arpDirection);
+    arpRateParam      = apvts.getRawParameterValue (ParamIDs::arpRate);
+    arpGateParam      = apvts.getRawParameterValue (ParamIDs::arpGate);
+    arpOctavesParam   = apvts.getRawParameterValue (ParamIDs::arpOctaves);
+    arpSwingParam     = apvts.getRawParameterValue (ParamIDs::arpSwing);
+    arpChanceParam    = apvts.getRawParameterValue (ParamIDs::arpChance);
+    arpRepeatsParam   = apvts.getRawParameterValue (ParamIDs::arpRepeats);
+    arpVelocityParam  = apvts.getRawParameterValue (ParamIDs::arpVelocity);
+    arpRetriggerParam = apvts.getRawParameterValue (ParamIDs::arpRetrigger);
+    arpSeedParam      = apvts.getRawParameterValue (ParamIDs::arpSeed);
     publishPads();
     startTimerHz (20);
 }
@@ -81,7 +93,31 @@ juce::AudioProcessorValueTreeState::ParameterLayout NeuroMPCProcessor::createLay
                                                     for (const auto& sc : neuro::scales) names.add (sc.name);
                                                     return names; }(), 0),
         std::make_unique<AudioParameterChoice> (ParameterID { ParamIDs::scaleRoot, 1 }, "Scale Root",
-                                                StringArray { "C", "C#", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B" }, 0)
+                                                StringArray { "C", "C#", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B" }, 0),
+        std::make_unique<AudioParameterBool> (ParameterID { ParamIDs::arpOn, 1 }, "Arp On", false),
+        std::make_unique<AudioParameterBool> (ParameterID { ParamIDs::arpLatch, 1 }, "Arp Latch", false),
+        std::make_unique<AudioParameterChoice> (ParameterID { ParamIDs::arpDirection, 1 }, "Arp Direction",
+                                                StringArray { "Up", "Down", "Up-Down", "Down-Up", "As played", "Reverse played",
+                                                              "Random", "Random (no repeat)", "Chord", "Octave cycle" }, 0),
+        std::make_unique<AudioParameterChoice> (ParameterID { ParamIDs::arpRate, 1 }, "Arp Rate",
+                                                StringArray { "1/1", "1/2", "1/4", "1/4T", "1/8", "1/8T", "1/16", "1/16T", "1/32" }, 6),
+        std::make_unique<AudioParameterFloat> (ParameterID { ParamIDs::arpGate, 1 }, "Arp Gate",
+                                               NormalisableRange<float> (5.0f, 100.0f, 1.0f), 50.0f,
+                                               AudioParameterFloatAttributes().withLabel ("%")),
+        std::make_unique<AudioParameterInt> (ParameterID { ParamIDs::arpOctaves, 1 }, "Arp Octaves", 1, 4, 1),
+        std::make_unique<AudioParameterFloat> (ParameterID { ParamIDs::arpSwing, 1 }, "Arp Swing",
+                                               NormalisableRange<float> (50.0f, 75.0f, 0.5f), 50.0f,
+                                               AudioParameterFloatAttributes().withLabel ("%")),
+        std::make_unique<AudioParameterFloat> (ParameterID { ParamIDs::arpChance, 1 }, "Arp Probability",
+                                               NormalisableRange<float> (0.0f, 100.0f, 1.0f), 100.0f,
+                                               AudioParameterFloatAttributes().withLabel ("%")),
+        std::make_unique<AudioParameterInt> (ParameterID { ParamIDs::arpRepeats, 1 }, "Arp Repeats", 1, 4, 1),
+        std::make_unique<AudioParameterInt> (ParameterID { ParamIDs::arpVelocity, 1 }, "Arp Velocity", 0, 127, 0,
+                                             AudioParameterIntAttributes().withStringFromValueFunction (
+                                                 [] (int v, int) { return v == 0 ? String ("as played") : String (v); })),
+        std::make_unique<AudioParameterChoice> (ParameterID { ParamIDs::arpRetrigger, 1 }, "Arp Retrigger",
+                                                StringArray { "Off", "First note", "Every note" }, 1),
+        std::make_unique<AudioParameterInt> (ParameterID { ParamIDs::arpSeed, 1 }, "Arp Seed", 1, 9999, 1)
     };
 }
 
@@ -97,6 +133,9 @@ void NeuroMPCProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     hostSampleRate = sampleRate;
     modBuffer.assign ((size_t) juce::jmax (1024, samplesPerBlock), 0.0f);
     bendSemitones = 0.0f;
+    arp = {};
+    arpWasOn = arpWasPlaying = false;
+    freeBeatOrigin = 0.0;
     gainSmoothed.reset (sampleRate, 0.02);
     gainSmoothed.setCurrentAndTargetValue (juce::Decibels::decibelsToGain (gainParam->load()));
 }
@@ -133,6 +172,25 @@ void NeuroMPCProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     vp.scaleMask = neuro::scales[(size_t) juce::jlimit (0, (int) neuro::scales.size() - 1, (int) scaleParam->load())].mask;
     vp.scaleRoot = (int) scaleRootParam->load();
 
+    // Host timing, shared by the pitch LFO and the arpeggiator. Never derived from the GUI.
+    const auto numSamples = buffer.getNumSamples();
+    auto bpm = 120.0;
+    std::optional<double> hostPpq; // set while the host transport plays
+
+    if (auto* ph = getPlayHead())
+    {
+        if (auto position = ph->getPosition())
+        {
+            bpm = position->getBpm().orFallback (120.0);
+
+            if (position->getIsPlaying())
+                if (const auto ppq = position->getPpqPosition())
+                    hostPpq = *ppq;
+        }
+    }
+
+    const auto beatsPerSample = bpm / 60.0 / hostSampleRate;
+
     // Pitch LFO rate: free-running, or locked to the host tempo and beat position.
     lfoIncrement = lfoRateParam->load() / hostSampleRate;
 
@@ -140,23 +198,133 @@ void NeuroMPCProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     {
         static constexpr double beatsPerCycle[] { 1.0, 4.0, 2.0, 1.0, 0.5, 0.25 };
         const auto beats = beatsPerCycle[juce::jlimit (1, 5, sync)];
-        auto bpm = 120.0;
 
-        if (auto* ph = getPlayHead())
-        {
-            if (auto position = ph->getPosition())
-            {
-                bpm = position->getBpm().orFallback (120.0);
-
-                if (const auto ppq = position->getPpqPosition(); ppq && position->getIsPlaying())
-                    lfoCyclePos = std::fmod (*ppq / beats, 1.0);
-            }
-        }
+        if (hostPpq)
+            lfoCyclePos = std::fmod (*hostPpq / beats, 1.0);
 
         lfoIncrement = bpm / 60.0 / beats / hostSampleRate;
     }
 
-    auto handle = [&] (int note, float velocity, int slice = -1)
+    // ---- Collect this block's events (incoming MIDI, UI, arpeggiator) ----
+    size_t numEvents = 0;
+    auto push = [&] (int offset, Event::Type type, int note, float value, int slice = -1)
+    {
+        if (numEvents < events.size())
+            events[numEvents++] = { juce::jlimit (0, juce::jmax (0, numSamples - 1), offset), type, note, value, slice };
+    };
+
+    auto arpSink = [&] (int offset, int note, float velocity)
+    {
+        push (offset, velocity > 0.0f ? Event::noteOn : Event::noteOff, note, velocity);
+
+        if (velocity > 0.0f)
+            arpLastNote.store (note);
+    };
+
+    const auto arpOn = arpOnParam->load() > 0.5f;
+    updateArpSettings();
+
+    if (arpWasOn && ! arpOn)
+        arp.flush (0, arpSink, true);          // switching off: release everything the arp started
+
+    if (arpWasPlaying && ! hostPpq)
+    {
+        arp.flush (0, arpSink, false);         // transport stopped: end generated notes, keep held keys
+        freeBeatOrigin = 0.0;
+    }
+
+    arpWasOn = arpOn;
+    arpWasPlaying = hostPpq.has_value();
+
+    auto beatAt = [&] (int offset) { return (hostPpq ? *hostPpq : freeBeatOrigin) + offset * beatsPerSample; };
+    int arpPos = 0;
+
+    auto noteInput = [&] (int offset, int note, float velocity)
+    {
+        if (! arpOn)
+        {
+            push (offset, velocity > 0.0f ? Event::noteOn : Event::noteOff, note, velocity);
+            return;
+        }
+
+        arp.process (arpPos, offset, beatAt (arpPos), beatsPerSample, arpSink);
+        arpPos = offset;
+
+        if (velocity <= 0.0f)
+            arp.noteOff (note);
+        else if (arp.noteOn (note, velocity) && ! hostPpq)
+            freeBeatOrigin = -offset * beatsPerSample; // free-running: the first step lands on this key press
+    };
+
+    {
+        const auto scope = uiFifo.read (uiFifo.getNumReady());
+        auto handleUi = [&] (const UiNote& u)
+        {
+            if (u.slice >= 0 || (u.velocity <= 0.0f && u.note >= sliceAuditionTag))
+                push (0, u.velocity > 0.0f ? Event::noteOn : Event::noteOff, u.note, u.velocity, u.slice); // direct audition
+            else
+                noteInput (0, u.note, u.velocity);
+        };
+
+        for (int i = 0; i < scope.blockSize1; ++i) handleUi (uiNotes[(size_t) (scope.startIndex1 + i)]);
+        for (int i = 0; i < scope.blockSize2; ++i) handleUi (uiNotes[(size_t) (scope.startIndex2 + i)]);
+    }
+
+    for (const auto meta : midi)
+    {
+        const auto t = juce::jlimit (0, juce::jmax (0, numSamples - 1), meta.samplePosition);
+        const auto msg = meta.getMessage();
+
+        if (msg.isNoteOn())
+        {
+            lastMidiNote.store (msg.getNoteNumber());
+            midiNoteCount.fetch_add (1);
+            noteInput (t, msg.getNoteNumber(), msg.getFloatVelocity());
+        }
+        else if (msg.isNoteOff())
+        {
+            noteInput (t, msg.getNoteNumber(), 0.0f);
+        }
+        else if (msg.isPitchWheel())
+        {
+            push (t, Event::control, -1, (float) (msg.getPitchWheelValue() - 8192) / 8192.0f);
+        }
+        else if (msg.isAllNotesOff() || msg.isAllSoundOff())
+        {
+            if (arpOn)
+            {
+                arp.process (arpPos, t, beatAt (arpPos), beatsPerSample, arpSink);
+                arpPos = t;
+            }
+
+            arp.flush (t, arpSink, true);
+            push (t, Event::control, -2, 0.0f);
+        }
+    }
+
+    if (arpOn)
+        arp.process (arpPos, numSamples, beatAt (arpPos), beatsPerSample, arpSink);
+
+    arp.endBlock (numSamples);
+    arpHeldCount.store (arp.heldCount());
+
+    if (! hostPpq)
+        freeBeatOrigin += numSamples * beatsPerSample;
+
+    // Stable insertion sort by time; at equal times note-offs and controls precede note-ons. No allocation.
+    for (size_t i = 1; i < numEvents; ++i)
+    {
+        const auto e = events[i];
+        auto j = i;
+
+        for (; j > 0 && (events[j - 1].offset > e.offset || (events[j - 1].offset == e.offset && events[j - 1].type > e.type)); --j)
+            events[j] = events[j - 1];
+
+        events[j] = e;
+    }
+
+    // ---- Render between events ----
+    auto handle = [&] (int note, float velocity, int slice)
     {
         if (velocity <= 0.0f)
             engine.noteOff (note);
@@ -166,41 +334,28 @@ void NeuroMPCProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
             engine.noteOn (note, velocity, *s, *sl, bank, padMap, vp);
     };
 
-    {
-        const auto scope = uiFifo.read (uiFifo.getNumReady());
-        auto handleUi = [&] (const UiNote& u) { handle (u.note, u.velocity, u.slice); };
-
-        for (int i = 0; i < scope.blockSize1; ++i) handleUi (uiNotes[(size_t) (scope.startIndex1 + i)]);
-        for (int i = 0; i < scope.blockSize2; ++i) handleUi (uiNotes[(size_t) (scope.startIndex2 + i)]);
-    }
-
-    auto render = [&] (int from, int to) { renderWithModulation (buffer, from, to); };
-
     int pos = 0;
 
-    for (const auto meta : midi)
+    for (size_t i = 0; i < numEvents; ++i)
     {
-        const auto t = juce::jlimit (pos, buffer.getNumSamples(), meta.samplePosition);
-        render (pos, t);
-        pos = t;
+        const auto& e = events[i];
+        renderWithModulation (buffer, pos, e.offset);
+        pos = e.offset;
 
-        const auto msg = meta.getMessage();
-
-        if (msg.isNoteOn())
+        if (e.type == Event::control)
         {
-            lastMidiNote.store (msg.getNoteNumber());
-            midiNoteCount.fetch_add (1);
-            handle (msg.getNoteNumber(), msg.getFloatVelocity());
+            if (e.note == -1)
+                bendSemitones = e.value * bendRangeParam->load();
+            else
+                engine.killAll();
         }
-        else if (msg.isNoteOff())
-            handle (msg.getNoteNumber(), 0.0f);
-        else if (msg.isPitchWheel())
-            bendSemitones = (float) (msg.getPitchWheelValue() - 8192) / 8192.0f * bendRangeParam->load();
-        else if (msg.isAllNotesOff() || msg.isAllSoundOff())
-            engine.killAll();
+        else
+        {
+            handle (e.note, e.type == Event::noteOn ? e.value : 0.0f, e.slice);
+        }
     }
 
-    render (pos, buffer.getNumSamples());
+    renderWithModulation (buffer, pos, numSamples);
 
     gainSmoothed.setTargetValue (juce::Decibels::decibelsToGain (gainParam->load()));
     gainSmoothed.applyGain (buffer, buffer.getNumSamples());
@@ -240,6 +395,24 @@ void NeuroMPCProcessor::renderWithModulation (juce::AudioBuffer<float>& buffer, 
         engine.render (buffer, from, n, modBuffer.data());
         from += n;
     }
+}
+
+void NeuroMPCProcessor::updateArpSettings()
+{
+    static constexpr double stepBeats[] { 4.0, 2.0, 1.0, 2.0 / 3.0, 0.5, 1.0 / 3.0, 0.25, 1.0 / 6.0, 0.125 };
+    auto a = arp.getSettings();
+    a.direction = (neuro::ArpDirection) juce::jlimit (0, 9, (int) arpDirectionParam->load());
+    a.stepBeats = stepBeats[juce::jlimit (0, 8, (int) arpRateParam->load())];
+    a.gate = arpGateParam->load() / 100.0f;
+    a.octaves = (int) arpOctavesParam->load();
+    a.swing = arpSwingParam->load() / 100.0f;
+    a.probability = arpChanceParam->load() / 100.0f;
+    a.repeats = (int) arpRepeatsParam->load();
+    a.fixedVelocity = (int) arpVelocityParam->load();
+    a.retrigger = (neuro::ArpRetrigger) juce::jlimit (0, 2, (int) arpRetriggerParam->load());
+    a.seed = (uint32_t) arpSeedParam->load();
+    arp.setSettings (a);                        // keeps the current latch state...
+    arp.setLatch (arpLatchParam->load() > 0.5f); // ...so un-latching can release latched notes
 }
 
 bool NeuroMPCProcessor::loadSample (const juce::File& file, juce::String& error)

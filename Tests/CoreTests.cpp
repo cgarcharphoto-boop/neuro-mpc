@@ -1,3 +1,4 @@
+#include "Core/Arpeggiator.h"
 #include "Core/KeyDetector.h"
 #include "Core/PadBank.h"
 #include "Core/PitchDetector.h"
@@ -322,6 +323,186 @@ static void padTests()
     CHECK (pads.playMap()[6].chokeGroup == 2);
 }
 
+namespace
+{
+    struct ArpEvent { int64_t sample; int note; float velocity; };
+
+    // Runs the arp in free time at 120 BPM / 48 kHz (1 beat = 24000 samples). keys: (sample, note, velocity; 0 = off).
+    // beatJump: if > 0, the beat position wraps every `beatJump` beats (a host loop).
+    std::vector<ArpEvent> runArp (const ArpSettings& settings, std::vector<std::tuple<int64_t, int, float>> keys,
+                                  int64_t totalSamples, int blockSize = 512, double beatJump = 0.0)
+    {
+        Arpeggiator arp;
+        arp.setSettings (settings);
+        std::vector<ArpEvent> events;
+        const double bps = 2.0 / 48000.0;
+        size_t nextKey = 0;
+
+        for (int64_t blockStart = 0; blockStart < totalSamples; blockStart += blockSize)
+        {
+            auto sink = [&] (int offset, int note, float vel) { events.push_back ({ blockStart + offset, note, vel }); };
+            const auto beatOf = [&] (int64_t sample) { auto b = sample * bps; return beatJump > 0.0 ? std::fmod (b, beatJump) : b; };
+            int from = 0;
+
+            while (nextKey < keys.size() && std::get<0> (keys[nextKey]) < blockStart + blockSize)
+            {
+                auto [at, note, vel] = keys[nextKey++];
+                const auto offset = (int) (at - blockStart);
+                arp.process (from, offset, beatOf (blockStart + from), bps, sink);
+                from = offset;
+                if (vel > 0.0f) arp.noteOn (note, vel); else arp.noteOff (note);
+            }
+
+            // A host loop jump happens at the block boundary, never inside a block.
+            arp.process (from, blockSize, beatOf (blockStart) + from * bps, bps, sink);
+            arp.endBlock (blockSize);
+        }
+
+        std::stable_sort (events.begin(), events.end(), [] (auto& a, auto& b)
+                          { return a.sample != b.sample ? a.sample < b.sample : (a.velocity == 0.0f) > (b.velocity == 0.0f); });
+        return events;
+    }
+
+    std::vector<int> onNotes (const std::vector<ArpEvent>& ev, size_t count = 64)
+    {
+        std::vector<int> notes;
+        for (auto& e : ev) if (e.velocity > 0.0f && notes.size() < count) notes.push_back (e.note);
+        return notes;
+    }
+
+    // Every on has exactly one later off, no off without an on, nothing left sounding.
+    bool balanced (const std::vector<ArpEvent>& ev)
+    {
+        std::array<int, 128> open {};
+        for (auto& e : ev)
+        {
+            if (e.velocity > 0.0f) { if (open[(size_t) e.note]++ != 0) return false; }
+            else if (open[(size_t) e.note]-- != 1) return false;
+        }
+        return std::all_of (open.begin(), open.end(), [] (int n) { return n == 0; });
+    }
+}
+
+static void arpTests()
+{
+    ArpSettings s;
+    const std::vector<std::tuple<int64_t, int, float>> cegHeld { { 0, 60, 0.8f }, { 0, 64, 0.8f }, { 0, 67, 0.8f } };
+    auto withRelease = [] (std::vector<std::tuple<int64_t, int, float>> k, int64_t at)
+    {
+        for (int n : { 60, 64, 67 }) k.emplace_back (at, n, 0.0f);
+        return k;
+    };
+
+    // Up, 1/16 at 120 BPM: a step every 6000 samples, gate 50% -> offs 3000 later.
+    auto ev = runArp (s, withRelease (cegHeld, 100000), 150000);
+    CHECK ((onNotes (ev, 5) == std::vector<int> { 60, 64, 67, 60, 64 }));
+    CHECK (ev[0].sample == 0 && ev[0].velocity > 0.0f && ev[1].sample == 3000 && ev[1].velocity == 0.0f);
+    CHECK (ev[2].sample == 6000 && ev[4].sample == 12000);
+    CHECK (balanced (ev));
+
+    auto order = [&] (ArpDirection d, int octaves = 1, std::vector<std::tuple<int64_t, int, float>> keys = {})
+    {
+        ArpSettings t;
+        t.direction = d;
+        t.octaves = octaves;
+        return onNotes (runArp (t, keys.empty() ? cegHeld : keys, 60000), 8);
+    };
+
+    CHECK ((order (ArpDirection::down) == std::vector<int> { 67, 64, 60, 67, 64, 60, 67, 64 }));
+    CHECK ((order (ArpDirection::upDown) == std::vector<int> { 60, 64, 67, 64, 60, 64, 67, 64 }));
+    CHECK ((order (ArpDirection::downUp) == std::vector<int> { 67, 64, 60, 64, 67, 64, 60, 64 }));
+    const std::vector<std::tuple<int64_t, int, float>> played { { 0, 67, 0.8f }, { 0, 60, 0.8f }, { 0, 64, 0.8f } };
+    CHECK ((order (ArpDirection::asPlayed, 1, played) == std::vector<int> { 67, 60, 64, 67, 60, 64, 67, 60 }));
+    CHECK ((order (ArpDirection::reversePlayed, 1, played) == std::vector<int> { 64, 60, 67, 64, 60, 67, 64, 60 }));
+    CHECK ((order (ArpDirection::up, 2) == std::vector<int> { 60, 64, 67, 72, 76, 79, 60, 64 }));
+    CHECK ((order (ArpDirection::octaveCycle, 2) == std::vector<int> { 60, 72, 64, 76, 67, 79, 60, 72 }));
+
+    // Chord: all notes together, next step an octave up.
+    {
+        ArpSettings t;
+        t.direction = ArpDirection::chord;
+        t.octaves = 2;
+        auto c = runArp (t, cegHeld, 20000);
+        std::vector<int64_t> at;
+        for (auto& e : c) if (e.velocity > 0.0f) at.push_back (e.sample);
+        CHECK (at.size() >= 6 && at[0] == 0 && at[2] == 0 && at[3] == 6000);
+        CHECK ((onNotes (c, 6) == std::vector<int> { 60, 64, 67, 72, 76, 79 }));
+    }
+
+    // Random: reproducible per seed, differs across seeds; no-repeat never repeats consecutively.
+    {
+        ArpSettings t;
+        t.direction = ArpDirection::random;
+        t.octaves = 2;
+        const auto a = onNotes (runArp (t, cegHeld, 600000), 100), b = onNotes (runArp (t, cegHeld, 600000), 100);
+        t.seed = 99;
+        const auto c = onNotes (runArp (t, cegHeld, 600000), 100);
+        CHECK (a == b && a != c && a.size() == 100);
+        t.direction = ArpDirection::randomNoRepeat;
+        const auto d = onNotes (runArp (t, cegHeld, 600000), 100);
+        CHECK (std::adjacent_find (d.begin(), d.end()) == d.end());
+    }
+
+    // Probability 50%: about half the steps play, repeatably.
+    {
+        ArpSettings t;
+        t.probability = 0.5f;
+        const auto a = onNotes (runArp (t, cegHeld, 6000 * 400), 1000);
+        CHECK (a.size() > 160 && a.size() < 240 && a == onNotes (runArp (t, cegHeld, 6000 * 400), 1000));
+    }
+
+    // Swing 66%: the 2nd step of each pair lands at 0.66 of the pair (2 x 6000 x 0.66 = 7920).
+    {
+        ArpSettings t;
+        t.swing = 0.66f;
+        std::vector<int64_t> at;
+        for (auto& e : runArp (t, cegHeld, 30000)) if (e.velocity > 0.0f) at.push_back (e.sample);
+        CHECK (at.size() >= 4 && at[1] == 7920 && at[2] == 12000 && at[3] == 19920);
+    }
+
+    // Repeats, gate, fixed velocity, 1/8 triplets.
+    {
+        ArpSettings t;
+        t.repeats = 2;
+        t.gate = 1.0f;
+        t.fixedVelocity = 127;
+        t.stepBeats = 1.0 / 3.0; // 1/8T = 8000 samples
+        auto r = runArp (t, cegHeld, 50000);
+        CHECK ((onNotes (r, 6) == std::vector<int> { 60, 60, 64, 64, 67, 67 }));
+        CHECK (r[0].velocity == 1.0f && r[1].sample == 8000);
+    }
+
+    // Retrigger: a new phrase after silence restarts the pattern; latch keeps playing and is replaced by a new chord.
+    {
+        ArpSettings t;
+        auto k = withRelease (cegHeld, 9000); // plays 60, 64 then stops
+        k.emplace_back (30000, 60, 0.8f);
+        k.emplace_back (30000, 64, 0.8f);
+        auto r = runArp (t, k, 40000);
+        CHECK ((onNotes (r) == std::vector<int> { 60, 64, 60, 64 }) && balanced (r)); // restarts at 60; gated offs
+
+        t.latch = true;
+        auto l = runArp (t, { { 0, 60, 0.8f }, { 0, 64, 0.8f }, { 1000, 60, 0.0f }, { 1000, 64, 0.0f },
+                              { 40000, 67, 0.8f }, { 41000, 67, 0.0f } }, 60000);
+        const auto n = onNotes (l);
+        // Latched C/E keeps playing after release (steps 0..36000), then the new G replaces it from the 42000 step.
+        CHECK ((std::vector<int> (n.begin(), n.begin() + 9) == std::vector<int> { 60, 64, 60, 64, 60, 64, 60, 67, 67 }));
+    }
+
+    // Robustness: balanced on/off across a 1-beat host loop and with any block size; block size never changes timing.
+    {
+        auto looped = runArp (s, withRelease (cegHeld, 200000), 260000, 512, 1.0);
+        CHECK (balanced (looped) && onNotes (looped).size() > 30);
+        auto small = runArp (s, withRelease (cegHeld, 100000), 150000, 37);
+        auto large = runArp (s, withRelease (cegHeld, 100000), 150000, 4096);
+        CHECK (small.size() == large.size() && balanced (small) && balanced (large));
+        bool same = small.size() == large.size();
+        for (size_t i = 0; same && i < small.size(); ++i)
+            same = small[i].sample == large[i].sample && small[i].note == large[i].note;
+        CHECK (same);
+    }
+}
+
 static void keyTests()
 {
     auto print = [] (const char* name, const KeyEstimate& k)
@@ -368,6 +549,7 @@ int main()
     pitchTests();
     scaleTests();
     padTests();
+    arpTests();
     keyTests();
     std::printf (failures == 0 ? "All core tests passed\n" : "%d failure(s)\n", failures);
     return failures == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
