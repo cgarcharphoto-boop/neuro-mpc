@@ -8,6 +8,8 @@
 namespace neuro
 {
 
+enum class PitchMode { resample, keepLength };
+
 // Persistent per-slice configuration. Runtime voice state lives in VoiceEngine, never here.
 struct SliceDefinition
 {
@@ -16,7 +18,8 @@ struct SliceDefinition
     int64_t endSample = 0;
 
     float gain = 1.0f;
-    float pitchSemitones = 0.0f;
+    float pitchSemitones = 0.0f;    // semitones + octaves + fine (cents / 100)
+    PitchMode pitchMode = PitchMode::resample; // resample: pitch changes duration; keepLength: rendered pitch-shift
     float timeStretchRatio = 1.0f; // 1.0 = original duration, 2.0 = twice as long
     bool preserveTransients = true; // stretch each transient-delimited segment separately (no pre-echo)
     float rootNote = -1.0f;         // manual pitch correction (fractional MIDI note); < 0 means use the detected pitch
@@ -25,6 +28,9 @@ struct SliceDefinition
 
     int64_t length() const noexcept { return endSample - startSample; }
     bool isStretched() const noexcept { return std::abs (timeStretchRatio - 1.0f) > 1.0e-4f; }
+    float renderedPitch() const noexcept { return pitchMode == PitchMode::keepLength ? pitchSemitones : 0.0f; }
+    // True when playback uses an offline render (stretch and/or duration-preserving pitch shift).
+    bool needsRender() const noexcept { return isStretched() || std::abs (renderedPitch()) > 1.0e-4f; }
 };
 
 // Contiguous, non-overlapping slices covering [0, totalLength).
@@ -34,6 +40,7 @@ class SliceSet
 public:
     static constexpr int64_t minSliceLength = 64;
     static constexpr float minStretch = 0.25f, maxStretch = 4.0f;
+    static constexpr float maxPitch = 24.0f; // +/- semitones per slice
 
     SliceSet() = default;
     explicit SliceSet (int64_t total) { reset (total); }
@@ -111,6 +118,24 @@ public:
         return true;
     }
 
+    bool setPitch (int i, float semitones)
+    {
+        if (i < 0 || i >= size())
+            return false;
+
+        slices[(size_t) i].pitchSemitones = std::clamp (semitones, -maxPitch, maxPitch);
+        return true;
+    }
+
+    bool setPitchMode (int i, PitchMode mode)
+    {
+        if (i < 0 || i >= size())
+            return false;
+
+        slices[(size_t) i].pitchMode = mode;
+        return true;
+    }
+
     bool setRootNote (int i, float midiNote)
     {
         if (i < 0 || i >= size())
@@ -175,6 +200,7 @@ public:
             auto& s = restored[i];
             s.timeStretchRatio = std::clamp (s.timeStretchRatio, minStretch, maxStretch);
             s.rootNote = s.rootNote < 0.0f ? -1.0f : std::min (s.rootNote, 127.0f);
+            s.pitchSemitones = std::clamp (s.pitchSemitones, -maxPitch, maxPitch);
 
             if (s.id <= 0 || s.length() < minSliceLength || (i > 0 && restored[i - 1].endSample != s.startSample))
                 return false;

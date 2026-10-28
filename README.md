@@ -3,7 +3,7 @@
 An open-source, MPC-style slice sampler for macOS: VST3 (Ableton Live), AU (Logic Pro), and Standalone.
 C++20 · JUCE 9.0.4 (pinned) · CMake. The master spec lives in `../gmni sampler/`.
 
-## Status: Milestone 1 + Phases 6–7 (time-stretch, pitch analysis)
+## Status: Milestones 1–2 (Phases 1–8: sampler, slicing, time-stretch, pitch analysis, chromatic pitch)
 
 | Works and is tested | |
 |---|---|
@@ -15,12 +15,13 @@ C++20 · JUCE 9.0.4 (pinned) · CMake. The master spec lives in `../gmni sampler
 | State | Parameters, sample path, slices (stable ids) saved in the DAW project; a missing file is reported, never substituted |
 | Time-stretch | Per-slice ratio ×0.25–×4 with pitch preserved (Signalsmith Stretch), target duration, ×0.5/×2/1:1, Apply to all, per-slice Preserve transients, background rendering + LRU cache. See [Documentation/TIME_STRETCHING.md](Documentation/TIME_STRETCHING.md) |
 | Pitch & key | YIN pitch per slice and per sample with confidence, a polyphony check, and pitched/uncertain/unpitched status; chroma + Krumhansl–Kessler key that reports uncertainty honestly; per-slice manual Root correction. See [Documentation/PITCH_ANALYSIS.md](Documentation/PITCH_ANALYSIS.md) |
+| Chromatic pitch | Per-slice ±24 st (12-note selector, octave, fine), Resample or Keep-length mode; global transpose, fine tune, pitch bend (range 0–24), pitch LFO (5 shapes, phase, host-tempo sync); Keys mode plays a slice chromatically from its detected or manual root, with scale snapping. See [Documentation/PITCH_SHIFTING.md](Documentation/PITCH_SHIFTING.md) |
 | Real-time safety | No locks, file I/O or allocation on the audio thread. Samples and slices reach the audio thread through `RtShared` (hazard-pointer handoff); UI note input goes through a lock-free FIFO |
 
 **Validation:** `auval` passes. Unit and integration tests pass (`ctest`).
 **Not yet done:** VST3 pluginval run, and manual testing inside Live and Logic.
 
-**Known limitations:** linear interpolation; pitch uses resampling (pitch-preserving shift arrives in Phase 8); stretched slices play the original until their render is ready; files load on the message thread with no progress bar; no undo yet; arm64 only.
+**Known limitations:** linear interpolation (resampling can alias); stretched slices play the original until their render is ready; files load on the message thread with no progress bar; no undo yet; arm64 only.
 
 ## Build
 

@@ -36,6 +36,8 @@ private:
     void updateInfo();
     void updateSlicePanel();
     void setSelectedStretch (float ratio, bool allSlices = false);
+    void setSelectedPitch (float semitones);
+    float selectedRoot() const; // reference for the 12-note selector
 
     using SliderAttachment = juce::AudioProcessorValueTreeState::SliderAttachment;
 
@@ -54,9 +56,21 @@ private:
     juce::ToggleButton preserveTransients { "Preserve transients" };
     juce::Label pitchInfo;
     juce::ComboBox rootNote;
+
+    // Selected-slice pitch: 12-note selector, octave, fine, mode
+    std::array<juce::TextButton, 12> noteButtons;
+    juce::TextButton octaveDown { "Oct-" }, octaveUp { "Oct+" };
+    juce::Label semitoneInfo;
+    juce::Slider fineCents { juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight };
+    juce::ComboBox pitchMode;
+
+    // Global pitch
+    juce::Slider transpose, fineTune, bendRange, lfoDepth, lfoRate, lfoPhase;
+    juce::ComboBox keyMode, scale, scaleRoot, lfoShape, lfoSync;
+    std::vector<std::unique_ptr<juce::Label>> knobLabels;
+    std::vector<std::unique_ptr<SliderAttachment>> sliderAttachments;
+    std::vector<std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment>> comboAttachments;
     std::vector<std::unique_ptr<Pad>> pads;
-    std::unique_ptr<SliderAttachment> gainAttachment, attackAttachment, releaseAttachment;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> modeAttachment;
     std::unique_ptr<juce::FileChooser> chooser;
     int shownSampleVersion = -1;
     juce::String lastError;

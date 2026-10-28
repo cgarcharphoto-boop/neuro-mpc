@@ -85,6 +85,50 @@ namespace
         return r;
     }
 
+    // Renders numBlocks and returns channel 0. Events: (block, note, velocity); wheel: (block, 14-bit value).
+    std::vector<float> capture (NeuroMPCProcessor& p, int numBlocks, std::vector<std::tuple<int, int, float>> events,
+                                std::vector<std::pair<int, int>> wheel = {})
+    {
+        std::vector<float> out;
+        juce::AudioBuffer<float> buf (2, block);
+
+        for (int b = 0; b < numBlocks; ++b)
+        {
+            juce::MidiBuffer midi;
+
+            if (b == 0)
+                midi.addEvent (juce::MidiMessage::allNotesOff (1), 0); // isolate from earlier one-shots
+
+            for (auto [at, value] : wheel)
+                if (at == b)
+                    midi.addEvent (juce::MidiMessage::pitchWheel (1, value), 0);
+
+            for (auto [at, note, vel] : events)
+                if (at == b)
+                    midi.addEvent (vel > 0.0f ? juce::MidiMessage::noteOn (1, note, vel) : juce::MidiMessage::noteOff (1, note), 0);
+
+            p.processBlock (buf, midi);
+            out.insert (out.end(), buf.getReadPointer (0), buf.getReadPointer (0) + block);
+        }
+
+        return out;
+    }
+
+    int audibleLength (const std::vector<float>& x)
+    {
+        int n = 0;
+        for (auto v : x) n += std::abs (v) > 1.0e-6f ? 1 : 0;
+        return n;
+    }
+
+    // Pitch (fractional MIDI) of x[start, start + length) via the plugin's own YIN detector.
+    double midiOf (const std::vector<float>& x, int start, int length)
+    {
+        const float* ch[] = { x.data() + start };
+        auto est = neuro::detectPitch (ch, 1, length, rate);
+        return est.status == neuro::PitchEstimate::Status::pitched ? est.midi : -1.0;
+    }
+
     void setParam (NeuroMPCProcessor& p, const char* id, float value)
     {
         auto* param = p.apvts.getParameter (id);
@@ -312,6 +356,96 @@ int main()
         b.setStateInformation (st.getData(), (int) st.getSize());
         CHECK (b.getSlices().getSlices()[1].rootNote == 60.0f && b.getSlices().getSlices()[0].rootNote < 0.0f);
         CHECK (b.waitForBackgroundWork (20000) && b.getSliceAnalysis (2) != nullptr);
+        toneFile.deleteFile();
+    }
+
+    // ---- Phase 8: chromatic pitch ----
+    {
+        auto toneFile = writeToneWav (juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("neuro_tone8.wav"), 220.0, 2.0);
+        NeuroMPCProcessor k;
+        k.prepareToPlay (rate, block);
+        CHECK (k.loadSample (toneFile, error));
+        setParam (k, ParamIDs::attack, 0.0f);
+        CHECK (k.waitForBackgroundWork (20000));
+        const int len = 96000;
+
+        // Resample: +7 st raises pitch and shortens by 2^(7/12).
+        k.editSlices ([] (auto& s) { s.setPitch (0, 7.0f); });
+        auto x = capture (k, 200, { { 0, 36, 1.0f } });
+        std::printf ("  resample +7: midi %.2f, %d samples (expected %.0f)\n", midiOf (x, 4800, 9600), audibleLength (x), len / std::exp2 (7.0 / 12.0));
+        CHECK (std::abs (midiOf (x, 4800, 9600) - 64.0) < 0.05);
+        CHECK (std::abs (audibleLength (x) - len / std::exp2 (7.0 / 12.0)) < 10);
+
+        // Keep length: same pitch, original duration (rendered in the background).
+        k.editSlices ([] (auto& s) { s.setPitchMode (0, neuro::PitchMode::keepLength); });
+        CHECK (k.waitForBackgroundWork (20000));
+        x = capture (k, 200, { { 0, 36, 1.0f } });
+        std::printf ("  keep length +7: midi %.2f, %d samples (expected %d)\n", midiOf (x, 4800, 9600), audibleLength (x), len);
+        CHECK (std::abs (midiOf (x, 4800, 9600) - 64.0) < 0.05);
+        CHECK (std::abs (audibleLength (x) - len) < len / 100);
+
+        // Fine tuning: +50 cents.
+        k.editSlices ([] (auto& s) { s.setPitch (0, 0.5f); s.setPitchMode (0, neuro::PitchMode::resample); });
+        CHECK (std::abs (midiOf (capture (k, 100, { { 0, 36, 1.0f } }), 4800, 9600) - 57.5) < 0.05);
+        k.editSlices ([] (auto& s) { s.setPitch (0, 0.0f); });
+
+        // Keys mode: the slice plays chromatically from its detected root (A3).
+        setParam (k, ParamIDs::keyMode, 1.0f);
+        k.setKeyboardSlice (0);
+        CHECK (std::abs (k.getKeyboardRoot() - 57.0f) < 0.05f);
+        for (int note : { 45, 57, 64, 69, 81 })
+        {
+            auto m = midiOf (capture (k, 60, { { 0, note, 1.0f } }), 2400, 4800);
+            std::printf ("  keys note %d -> midi %.2f\n", note, m);
+            CHECK (std::abs (m - note) < 0.05);
+        }
+
+        CHECK (k.padNote (0) == 57 && k.padNote (5) == 62); // pads play chromatically from the root
+
+        // Scale snapping (C major): C# -> C, F# -> F.
+        setParam (k, ParamIDs::scale, 1.0f);
+        CHECK (std::abs (midiOf (capture (k, 60, { { 0, 61, 1.0f } }), 2400, 4800) - 60.0) < 0.05);
+        CHECK (std::abs (midiOf (capture (k, 60, { { 0, 66, 1.0f } }), 2400, 4800) - 65.0) < 0.05);
+        setParam (k, ParamIDs::scale, 0.0f);
+
+        // Manual root overrides detection: root C4 means note 60 plays the sample unshifted (A3).
+        k.editSlices ([] (auto& s) { s.setRootNote (0, 60.0f); });
+        CHECK (std::abs (midiOf (capture (k, 60, { { 0, 60, 1.0f } }), 2400, 4800) - 57.0) < 0.05);
+        k.editSlices ([] (auto& s) { s.setRootNote (0, -1.0f); });
+
+        // Global transpose and fine tune.
+        setParam (k, ParamIDs::transpose, 12.0f);
+        setParam (k, ParamIDs::fineTune, -50.0f);
+        CHECK (std::abs (midiOf (capture (k, 60, { { 0, 57, 1.0f } }), 2400, 4800) - 68.5) < 0.05);
+        setParam (k, ParamIDs::transpose, 0.0f);
+        setParam (k, ParamIDs::fineTune, 0.0f);
+
+        // Pitch bend: full up with a 2-semitone range, applied to a held note, then centred again.
+        x = capture (k, 120, { { 0, 57, 1.0f } }, { { 40, 16383 }, { 80, 8192 } });
+        const auto before = midiOf (x, 2400, 4800), bent = midiOf (x, 50 * block, 4800), after = midiOf (x, 100 * block, 4800);
+        std::printf ("  bend: %.2f -> %.2f -> %.2f\n", before, bent, after);
+        CHECK (std::abs (before - 57.0) < 0.05 && std::abs (bent - 59.0) < 0.05 && std::abs (after - 57.0) < 0.05);
+
+        // Pitch LFO: +/-1 semitone sine at 2 Hz sweeps the measured pitch across ~56..58.
+        setParam (k, ParamIDs::lfoDepth, 1.0f);
+        setParam (k, ParamIDs::lfoRate, 2.0f);
+        x = capture (k, 100, { { 0, 57, 1.0f } });
+        double lo = 200.0, hi = 0.0;
+        for (int start = 0; start + 3000 < 48000; start += 600)
+            if (auto m = midiOf (x, start, 3000); m > 0.0) { lo = std::min (lo, m); hi = std::max (hi, m); }
+        std::printf ("  LFO +/-1 st: measured %.2f .. %.2f\n", lo, hi);
+        CHECK (lo < 56.3 && lo > 55.8 && hi > 57.7 && hi < 58.2);
+        setParam (k, ParamIDs::lfoDepth, 0.0f);
+
+        // State: pitch, mode and keyboard slice persist.
+        k.editSlices ([] (auto& s) { s.setPitch (0, -3.25f); s.setPitchMode (0, neuro::PitchMode::keepLength); });
+        juce::MemoryBlock st;
+        k.getStateInformation (st);
+        NeuroMPCProcessor r2;
+        r2.setStateInformation (st.getData(), (int) st.getSize());
+        CHECK (std::abs (r2.getSlices().getSlices()[0].pitchSemitones + 3.25f) < 1.0e-6f);
+        CHECK (r2.getSlices().getSlices()[0].pitchMode == neuro::PitchMode::keepLength);
+        CHECK (r2.isKeyboardMode() && r2.getKeyboardSlice() == 0);
         toneFile.deleteFile();
     }
 

@@ -8,7 +8,7 @@ namespace neuro
 namespace
 {
     // Stretches source[start, start + length) into dest[destStart, destStart + destLength).
-    void renderRegion (const juce::AudioBuffer<float>& source, int start, int length, double sampleRate,
+    void renderRegion (const juce::AudioBuffer<float>& source, int start, int length, double sampleRate, float pitch,
                        juce::AudioBuffer<float>& dest, int destStart, int destLength)
     {
         const auto channels = source.getNumChannels();
@@ -35,6 +35,7 @@ namespace
 
         signalsmith::stretch::SignalsmithStretch<float> stretch;
         stretch.presetDefault (channels, (float) sampleRate);
+        stretch.setTransposeSemitones (pitch);
 
         if (stretch.exact (input.getArrayOfReadPointers(), inLength, output.getArrayOfWritePointers(), outLength))
             for (int ch = 0; ch < channels; ++ch)
@@ -43,7 +44,8 @@ namespace
 }
 
 std::shared_ptr<juce::AudioBuffer<float>> renderStretch (const juce::AudioBuffer<float>& source, int64_t start, int64_t end,
-                                                         double sampleRate, float ratio, bool preserveTransients)
+                                                         double sampleRate, float ratio, bool preserveTransients,
+                                                         float pitchSemitones)
 {
     const auto channels = source.getNumChannels();
     start = juce::jlimit<int64_t> (0, source.getNumSamples(), start);
@@ -81,7 +83,8 @@ std::shared_ptr<juce::AudioBuffer<float>> renderStretch (const juce::AudioBuffer
         const auto o1 = k + 2 == bounds.size() ? outLength : (int) std::lround (bounds[k + 1] * (double) ratio);
 
         if (o1 > o0)
-            renderRegion (source, (int) start + bounds[k], bounds[k + 1] - bounds[k], sampleRate, *output, o0, o1 - o0);
+            renderRegion (source, (int) start + bounds[k], bounds[k + 1] - bounds[k], sampleRate,
+                          std::clamp (pitchSemitones, -SliceSet::maxPitch, SliceSet::maxPitch), *output, o0, o1 - o0);
     }
 
     for (int ch = 0; ch < channels; ++ch)
@@ -95,7 +98,7 @@ StretchDone renderStretchJob (const StretchJob& job)
     const auto& s = job.slice;
     return { job.sampleVersion,
              { StretchKey::of (s), renderStretch (job.sample->buffer, s.startSample, s.endSample, job.sample->sampleRate,
-                                                  s.timeStretchRatio, s.preserveTransients) } };
+                                                  s.timeStretchRatio, s.preserveTransients, s.renderedPitch()) } };
 }
 
 } // namespace neuro

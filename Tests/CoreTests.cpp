@@ -1,6 +1,7 @@
 #include "Core/KeyDetector.h"
 #include "Core/PitchDetector.h"
 #include "Core/RtShared.h"
+#include "Core/Scales.h"
 #include "Core/SliceSet.h"
 #include "Core/TransientDetector.h"
 
@@ -256,6 +257,35 @@ static void pitchTests()
     }
 }
 
+static void scaleTests()
+{
+    const auto major = scales[1].mask, minorPent = scales[6].mask;
+    CHECK (snapToScale (61, scales[0].mask, 0) == 61);      // chromatic: unchanged
+    CHECK (snapToScale (61, major, 0) == 60);               // C# -> C (tie resolves down)
+    CHECK (snapToScale (66, major, 0) == 65);               // F# -> F
+    CHECK (snapToScale (64, major, 0) == 64);
+    CHECK (snapToScale (63, major, 2) == 62);               // D major: Eb -> D
+    CHECK (snapToScale (61, minorPent, 9) == 60);           // A minor pentatonic: C# -> C
+    CHECK (snapToScale (59, minorPent, 9) == 60);           // B -> C (A or C: tie down would be... B-1=Bb no, B+1=C yes)
+
+    for (int note = 0; note < 128; ++note)
+        for (const auto& sc : scales)
+            CHECK (inScale (snapToScale (note, sc.mask, 4), sc.mask, 4));
+
+    // 12-note selector: root A3 (57), no shift; choosing E -> +7 (nearest), C -> +3, A -> 0; fine part kept.
+    CHECK (shiftForPitchClass (57.0f, 0.0f, 4) == -5.0f);   // E: -5 is nearer than +7
+    CHECK (shiftForPitchClass (57.0f, 0.0f, 0) == 3.0f);
+    CHECK (shiftForPitchClass (57.0f, 0.0f, 9) == 0.0f);
+    CHECK (shiftForPitchClass (57.0f, 12.25f, 0) == 15.25f); // stays in the current octave, keeps +25 c
+    CHECK (shiftForPitchClass (57.3f, 0.0f, 9) == 0.0f);     // detuned root still maps to A
+
+    SliceSet s (10000);
+    CHECK (s.setPitch (0, 30.0f) && s.getSlices()[0].pitchSemitones == SliceSet::maxPitch);
+    CHECK (s.setPitch (0, -7.5f) && s.getSlices()[0].pitchSemitones == -7.5f);
+    CHECK (! s.getSlices()[0].needsRender());               // resample mode
+    CHECK (s.setPitchMode (0, PitchMode::keepLength) && s.getSlices()[0].needsRender() && s.getSlices()[0].renderedPitch() == -7.5f);
+}
+
 static void keyTests()
 {
     auto print = [] (const char* name, const KeyEstimate& k)
@@ -300,6 +330,7 @@ int main()
     transientTests();
     rtSharedTests();
     pitchTests();
+    scaleTests();
     keyTests();
     std::printf (failures == 0 ? "All core tests passed\n" : "%d failure(s)\n", failures);
     return failures == 0 ? EXIT_SUCCESS : EXIT_FAILURE;

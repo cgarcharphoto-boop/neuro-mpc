@@ -1,5 +1,6 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
+#include "Core/Scales.h"
 
 namespace
 {
@@ -16,6 +17,17 @@ NeuroMPCProcessor::NeuroMPCProcessor()
     attackParam  = apvts.getRawParameterValue (ParamIDs::attack);
     releaseParam = apvts.getRawParameterValue (ParamIDs::release);
     modeParam    = apvts.getRawParameterValue (ParamIDs::playMode);
+    transposeParam = apvts.getRawParameterValue (ParamIDs::transpose);
+    fineParam      = apvts.getRawParameterValue (ParamIDs::fineTune);
+    bendRangeParam = apvts.getRawParameterValue (ParamIDs::bendRange);
+    lfoDepthParam  = apvts.getRawParameterValue (ParamIDs::lfoDepth);
+    lfoRateParam   = apvts.getRawParameterValue (ParamIDs::lfoRate);
+    lfoShapeParam  = apvts.getRawParameterValue (ParamIDs::lfoShape);
+    lfoSyncParam   = apvts.getRawParameterValue (ParamIDs::lfoSync);
+    lfoPhaseParam  = apvts.getRawParameterValue (ParamIDs::lfoPhase);
+    keyModeParam   = apvts.getRawParameterValue (ParamIDs::keyMode);
+    scaleParam     = apvts.getRawParameterValue (ParamIDs::scale);
+    scaleRootParam = apvts.getRawParameterValue (ParamIDs::scaleRoot);
     startTimerHz (20);
 }
 
@@ -38,7 +50,37 @@ juce::AudioProcessorValueTreeState::ParameterLayout NeuroMPCProcessor::createLay
                                                NormalisableRange<float> (1.0f, 2000.0f, 0.1f, 0.4f), 30.0f,
                                                AudioParameterFloatAttributes().withLabel ("ms")),
         std::make_unique<AudioParameterChoice> (ParameterID { ParamIDs::playMode, 1 }, "Play Mode",
-                                                StringArray { "One-Shot", "Gate" }, 0)
+                                                StringArray { "One-Shot", "Gate" }, 0),
+        std::make_unique<AudioParameterFloat> (ParameterID { ParamIDs::transpose, 1 }, "Transpose",
+                                               NormalisableRange<float> (-24.0f, 24.0f, 1.0f), 0.0f,
+                                               AudioParameterFloatAttributes().withLabel ("st")),
+        std::make_unique<AudioParameterFloat> (ParameterID { ParamIDs::fineTune, 1 }, "Fine Tune",
+                                               NormalisableRange<float> (-100.0f, 100.0f, 0.1f), 0.0f,
+                                               AudioParameterFloatAttributes().withLabel ("c")),
+        std::make_unique<AudioParameterFloat> (ParameterID { ParamIDs::bendRange, 1 }, "Bend Range",
+                                               NormalisableRange<float> (0.0f, 24.0f, 1.0f), 2.0f,
+                                               AudioParameterFloatAttributes().withLabel ("st")),
+        std::make_unique<AudioParameterFloat> (ParameterID { ParamIDs::lfoDepth, 1 }, "Pitch LFO Depth",
+                                               NormalisableRange<float> (0.0f, 12.0f, 0.01f, 0.5f), 0.0f,
+                                               AudioParameterFloatAttributes().withLabel ("st")),
+        std::make_unique<AudioParameterFloat> (ParameterID { ParamIDs::lfoRate, 1 }, "Pitch LFO Rate",
+                                               NormalisableRange<float> (0.01f, 20.0f, 0.01f, 0.4f), 5.0f,
+                                               AudioParameterFloatAttributes().withLabel ("Hz")),
+        std::make_unique<AudioParameterChoice> (ParameterID { ParamIDs::lfoShape, 1 }, "Pitch LFO Shape",
+                                                StringArray { "Sine", "Triangle", "Saw", "Square", "Sample & Hold" }, 0),
+        std::make_unique<AudioParameterChoice> (ParameterID { ParamIDs::lfoSync, 1 }, "Pitch LFO Sync",
+                                                StringArray { "Free", "1 bar", "1/2", "1/4", "1/8", "1/16" }, 0),
+        std::make_unique<AudioParameterFloat> (ParameterID { ParamIDs::lfoPhase, 1 }, "Pitch LFO Phase",
+                                               NormalisableRange<float> (0.0f, 360.0f, 1.0f), 0.0f,
+                                               AudioParameterFloatAttributes().withLabel ("deg")),
+        std::make_unique<AudioParameterChoice> (ParameterID { ParamIDs::keyMode, 1 }, "Key Mode",
+                                                StringArray { "Pads", "Keys" }, 0),
+        std::make_unique<AudioParameterChoice> (ParameterID { ParamIDs::scale, 1 }, "Scale", [] {
+                                                    StringArray names;
+                                                    for (const auto& sc : neuro::scales) names.add (sc.name);
+                                                    return names; }(), 0),
+        std::make_unique<AudioParameterChoice> (ParameterID { ParamIDs::scaleRoot, 1 }, "Scale Root",
+                                                StringArray { "C", "C#", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B" }, 0)
     };
 }
 
@@ -48,9 +90,12 @@ bool NeuroMPCProcessor::isBusesLayoutSupported (const BusesLayout& layouts) cons
     return out == juce::AudioChannelSet::mono() || out == juce::AudioChannelSet::stereo();
 }
 
-void NeuroMPCProcessor::prepareToPlay (double sampleRate, int)
+void NeuroMPCProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
     engine.prepare (sampleRate);
+    hostSampleRate = sampleRate;
+    modBuffer.assign ((size_t) juce::jmax (1024, samplesPerBlock), 0.0f);
+    bendSemitones = 0.0f;
     gainSmoothed.reset (sampleRate, 0.02);
     gainSmoothed.setCurrentAndTargetValue (juce::Decibels::decibelsToGain (gainParam->load()));
 }
@@ -76,7 +121,38 @@ void NeuroMPCProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
         lastBank = bank;
     }
 
-    const neuro::VoiceParams vp { attackParam->load(), releaseParam->load(), modeParam->load() < 0.5f };
+    neuro::VoiceParams vp;
+    vp.attackMs = attackParam->load();
+    vp.releaseMs = releaseParam->load();
+    vp.oneShot = modeParam->load() < 0.5f;
+    vp.keyboardMode = keyModeParam->load() > 0.5f;
+    vp.keyboardSlice = keyboardSliceIndex.load();
+    vp.keyboardRoot = keyboardRootNote.load();
+    vp.scaleMask = neuro::scales[(size_t) juce::jlimit (0, (int) neuro::scales.size() - 1, (int) scaleParam->load())].mask;
+    vp.scaleRoot = (int) scaleRootParam->load();
+
+    // Pitch LFO rate: free-running, or locked to the host tempo and beat position.
+    lfoIncrement = lfoRateParam->load() / hostSampleRate;
+
+    if (const auto sync = (int) lfoSyncParam->load(); sync > 0)
+    {
+        static constexpr double beatsPerCycle[] { 1.0, 4.0, 2.0, 1.0, 0.5, 0.25 };
+        const auto beats = beatsPerCycle[juce::jlimit (1, 5, sync)];
+        auto bpm = 120.0;
+
+        if (auto* ph = getPlayHead())
+        {
+            if (auto position = ph->getPosition())
+            {
+                bpm = position->getBpm().orFallback (120.0);
+
+                if (const auto ppq = position->getPpqPosition(); ppq && position->getIsPlaying())
+                    lfoCyclePos = std::fmod (*ppq / beats, 1.0);
+            }
+        }
+
+        lfoIncrement = bpm / 60.0 / beats / hostSampleRate;
+    }
 
     auto handle = [&] (int note, float velocity)
     {
@@ -98,11 +174,7 @@ void NeuroMPCProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
         for (int i = 0; i < scope.blockSize2; ++i) handle (uiNotes[(size_t) (scope.startIndex2 + i)].note, uiNotes[(size_t) (scope.startIndex2 + i)].velocity);
     }
 
-    auto render = [&] (int from, int to)
-    {
-        if (to > from)
-            engine.render (buffer, from, to - from);
-    };
+    auto render = [&] (int from, int to) { renderWithModulation (buffer, from, to); };
 
     int pos = 0;
 
@@ -118,6 +190,8 @@ void NeuroMPCProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
             handle (msg.getNoteNumber(), msg.getFloatVelocity());
         else if (msg.isNoteOff())
             handle (msg.getNoteNumber(), 0.0f);
+        else if (msg.isPitchWheel())
+            bendSemitones = (float) (msg.getPitchWheelValue() - 8192) / 8192.0f * bendRangeParam->load();
         else if (msg.isAllNotesOff() || msg.isAllSoundOff())
             engine.killAll();
     }
@@ -126,6 +200,42 @@ void NeuroMPCProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
 
     gainSmoothed.setTargetValue (juce::Decibels::decibelsToGain (gainParam->load()));
     gainSmoothed.applyGain (buffer, buffer.getNumSamples());
+}
+
+// Renders [from, to) in chunks, filling the per-sample global pitch offset: transpose + fine + bend + LFO.
+void NeuroMPCProcessor::renderWithModulation (juce::AudioBuffer<float>& buffer, int from, int to)
+{
+    const auto base = transposeParam->load() + fineParam->load() / 100.0f + bendSemitones;
+    const auto depth = lfoDepthParam->load();
+    const auto shape = (int) lfoShapeParam->load();
+    const auto phaseOffset = lfoPhaseParam->load() / 360.0;
+
+    while (from < to)
+    {
+        const auto n = juce::jmin (to - from, (int) modBuffer.size());
+
+        for (int i = 0; i < n; ++i)
+        {
+            const auto p = std::fmod (lfoCyclePos + phaseOffset, 1.0);
+            const auto lfo = shape == 0 ? std::sin (juce::MathConstants<double>::twoPi * p)
+                           : shape == 1 ? 4.0 * std::abs (p - 0.5) - 1.0   // +1 at cycle start, -1 mid-cycle
+                           : shape == 2 ? 2.0 * p - 1.0
+                           : shape == 3 ? (p < 0.5 ? 1.0 : -1.0)
+                                        : (double) sampleAndHold;
+
+            modBuffer[(size_t) i] = base + depth * (float) lfo;
+            lfoCyclePos += lfoIncrement;
+
+            if (lfoCyclePos >= 1.0)
+            {
+                lfoCyclePos -= std::floor (lfoCyclePos);
+                sampleAndHold = lfoRandom.nextFloat() * 2.0f - 1.0f;
+            }
+        }
+
+        engine.render (buffer, from, n, modBuffer.data());
+        from += n;
+    }
 }
 
 bool NeuroMPCProcessor::loadSample (const juce::File& file, juce::String& error)
@@ -188,6 +298,49 @@ void NeuroMPCProcessor::publishSlices()
     rtSlices.publish (std::make_shared<const neuro::SliceSet> (slices));
     refreshStretch();
     refreshAnalysis();
+    updateKeyboardMap();
+}
+
+void NeuroMPCProcessor::setKeyboardSlice (int sliceIndex)
+{
+    keyboardSlice = juce::jmax (0, sliceIndex);
+    updateKeyboardMap();
+}
+
+void NeuroMPCProcessor::updateKeyboardMap()
+{
+    const auto index = juce::jlimit (0, juce::jmax (0, slices.size() - 1), keyboardSlice);
+    auto root = 60.0f;
+
+    if (index < slices.size())
+    {
+        const auto& s = slices.getSlices()[(size_t) index];
+        const auto* a = getSliceAnalysis (index);
+
+        if (s.rootNote >= 0.0f)
+            root = s.rootNote;
+        else if (a != nullptr && a->pitch.status == neuro::PitchEstimate::Status::pitched)
+            root = (float) a->pitch.midi;
+    }
+
+    keyboardSliceIndex.store (index);
+    keyboardRootNote.store (root);
+}
+
+int NeuroMPCProcessor::padNote (int padIndex) const
+{
+    // Keys mode: pads play the keyboard slice chromatically upwards from its root.
+    return isKeyboardMode() ? juce::jlimit (0, 127, juce::roundToInt (keyboardRootNote.load()) + padIndex)
+                            : neuro::VoiceEngine::baseNote + padIndex;
+}
+
+int NeuroMPCProcessor::auditionNote (int sliceIndex)
+{
+    if (! isKeyboardMode())
+        return neuro::VoiceEngine::baseNote + sliceIndex;
+
+    setKeyboardSlice (sliceIndex);
+    return juce::jlimit (0, 127, juce::roundToInt (keyboardRootNote.load()));
 }
 
 void NeuroMPCProcessor::refreshAnalysis()
@@ -242,7 +395,7 @@ void NeuroMPCProcessor::refreshStretch()
 
     for (const auto& s : slices.getSlices())
     {
-        if (! s.isStretched())
+        if (! s.needsRender())
             continue;
 
         const auto key = neuro::StretchKey::of (s);
@@ -316,6 +469,8 @@ void NeuroMPCProcessor::processBackgroundResults()
 
     if (! results.empty())
         refreshStretch();
+
+    updateKeyboardMap(); // the detected root may have just arrived
 }
 
 bool NeuroMPCProcessor::waitForBackgroundWork (int timeoutMs)
@@ -337,7 +492,7 @@ bool NeuroMPCProcessor::waitForBackgroundWork (int timeoutMs)
 
 NeuroMPCProcessor::StretchStatus NeuroMPCProcessor::getStretchStatus (int sliceIndex) const
 {
-    if (sliceIndex < 0 || sliceIndex >= slices.size() || ! slices.getSlices()[(size_t) sliceIndex].isStretched())
+    if (sliceIndex < 0 || sliceIndex >= slices.size() || ! slices.getSlices()[(size_t) sliceIndex].needsRender())
         return StretchStatus::original;
 
     return stretchBank != nullptr && stretchBank->find (slices.getSlices()[(size_t) sliceIndex]) != nullptr
@@ -358,6 +513,7 @@ void NeuroMPCProcessor::getStateInformation (juce::MemoryBlock& dest)
 {
     juce::ValueTree root ("NEURO_MPC");
     root.setProperty ("version", stateVersion, nullptr);
+    root.setProperty ("keyboardSlice", keyboardSlice, nullptr);
     root.appendChild (apvts.copyState(), nullptr);
 
     juce::ValueTree sampleTree ("SAMPLE");
@@ -374,6 +530,7 @@ void NeuroMPCProcessor::getStateInformation (juce::MemoryBlock& dest)
         t.setProperty ("end", (juce::int64) s.endSample, nullptr);
         t.setProperty ("gain", s.gain, nullptr);
         t.setProperty ("pitch", s.pitchSemitones, nullptr);
+        t.setProperty ("pitchMode", (int) s.pitchMode, nullptr);
         t.setProperty ("stretch", s.timeStretchRatio, nullptr);
         t.setProperty ("preserveTransients", s.preserveTransients, nullptr);
         t.setProperty ("rootNote", s.rootNote, nullptr);
@@ -400,6 +557,8 @@ void NeuroMPCProcessor::setStateInformation (const void* data, int size)
     if (auto params = root.getChildWithName (apvts.state.getType()); params.isValid())
         apvts.replaceState (params);
 
+    keyboardSlice = root.getProperty ("keyboardSlice", 0);
+
     const auto path = root.getChildWithName ("SAMPLE")["path"].toString();
 
     if (path.isEmpty())
@@ -424,6 +583,7 @@ void NeuroMPCProcessor::setStateInformation (const void* data, int size)
         s.endSample = (juce::int64) t["end"];
         s.gain = t.getProperty ("gain", 1.0f);
         s.pitchSemitones = t.getProperty ("pitch", 0.0f);
+        s.pitchMode = (int) t.getProperty ("pitchMode", 0) == 1 ? neuro::PitchMode::keepLength : neuro::PitchMode::resample;
         s.timeStretchRatio = t.getProperty ("stretch", 1.0f);
         s.preserveTransients = t.getProperty ("preserveTransients", true);
         s.rootNote = t.getProperty ("rootNote", -1.0f);

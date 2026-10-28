@@ -146,7 +146,7 @@ void WaveformView::mouseDown (const juce::MouseEvent& e)
 
     if (selected >= 0)
     {
-        auditioning = neuro::VoiceEngine::baseNote + selected;
+        auditioning = proc.auditionNote (selected);
         proc.auditionNote (auditioning, 0.9f);
     }
 

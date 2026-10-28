@@ -13,6 +13,13 @@ void VoiceEngine::noteOn (int note, float velocity, const SampleData& sample, co
                           const StretchBank* bank, const VoiceParams& params) noexcept
 {
     auto index = note - baseNote;
+    double keyOffset = 0.0;
+
+    if (params.keyboardMode)
+    {
+        index = params.keyboardSlice;
+        keyOffset = snapToScale (note, params.scaleMask, params.scaleRoot) - (double) params.keyboardRoot;
+    }
 
     if (index < 0 || index >= slices.size())
         return;
@@ -28,8 +35,9 @@ void VoiceEngine::noteOn (int note, float velocity, const SampleData& sample, co
     const auto* src = &sample.buffer;
     const auto displayOffset = start;
     auto displayScale = 1.0;
+    auto pitch = (double) slice.pitchSemitones; // resampled unless a keep-length render is used
 
-    if (bank != nullptr && slice.isStretched())
+    if (bank != nullptr && slice.needsRender())
     {
         if (const auto* entry = bank->find (slice); entry != nullptr && entry->audio->getNumSamples() >= 2)
         {
@@ -37,6 +45,7 @@ void VoiceEngine::noteOn (int note, float velocity, const SampleData& sample, co
             start = 0;
             end = src->getNumSamples();
             displayScale = 1.0 / slice.timeStretchRatio;
+            pitch -= slice.renderedPitch(); // already in the render
         }
     }
 
@@ -48,27 +57,23 @@ void VoiceEngine::noteOn (int note, float velocity, const SampleData& sample, co
         if (candidate.order < v->order) v = &candidate; // steal the oldest
     }
 
-    // Pitch is resampling-based (changes duration); pitch-preserving shift arrives in Phase 8.
-    auto rate = sample.sampleRate / hostRate * std::pow (2.0, (double) slice.pitchSemitones / 12.0);
+    const auto rate = sample.sampleRate / hostRate * std::exp2 ((pitch + keyOffset) / 12.0);
 
     v->active = true;
     v->releasing = false;
-    v->note = note;
+    v->note = params.oneShot ? -1 : note; // one-shot voices ignore note-off
     v->src = src;
     v->displayOffset = displayOffset;
     v->displayScale = displayScale;
     v->start = start;
     v->end = end;
-    v->rate = slice.reverse ? -rate : rate;
+    v->baseRate = slice.reverse ? -rate : rate;
     v->pos = slice.reverse ? (double) (end - 1) : (double) start;
     v->gain = juce::jlimit (0.0f, 1.0f, velocity) * slice.gain;
     v->attackStep = 1.0f / (params.attackMs * 0.001f * (float) hostRate + 1.0f);
     v->releaseStep = 1.0f / (params.releaseMs * 0.001f * (float) hostRate + 1.0f);
     v->env = params.attackMs > 0.0f ? 0.0f : 1.0f;
     v->order = ++counter;
-
-    if (params.oneShot)
-        v->note = -1; // one-shot voices ignore note-off
 }
 
 void VoiceEngine::noteOff (int note) noexcept
@@ -93,18 +98,23 @@ void VoiceEngine::dropVoicesNotIn (const StretchBank* bank, const juce::AudioBuf
             v.active = false;
 }
 
-void VoiceEngine::render (juce::AudioBuffer<float>& out, int startSample, int numSamples) noexcept
+void VoiceEngine::render (juce::AudioBuffer<float>& out, int startSample, int numSamples, const float* modSemitones) noexcept
 {
     constexpr double declick = 64.0; // samples of fade before a slice's end
+    constexpr int modInterval = 16;  // pitch modulation update rate (samples)
     const auto outChannels = out.getNumChannels();
     const Voice* newest = nullptr;
 
     for (auto& v : voices)
     {
         const auto srcChannels = v.active ? v.src->getNumChannels() : 0;
+        double rate = v.baseRate;
 
         for (int i = 0; i < numSamples && v.active; ++i)
         {
+            if (i % modInterval == 0)
+                rate = v.baseRate * std::exp2 ((double) modSemitones[i] / 12.0);
+
             auto idx = (int64_t) std::floor (v.pos);
 
             if (idx < v.start || idx >= v.end)
@@ -128,7 +138,7 @@ void VoiceEngine::render (juce::AudioBuffer<float>& out, int startSample, int nu
                 v.env = std::min (1.0f, v.env + v.attackStep);
             }
 
-            auto remaining = v.rate > 0.0 ? ((double) v.end - v.pos) / v.rate : (v.pos - (double) v.start) / -v.rate;
+            auto remaining = rate > 0.0 ? ((double) v.end - v.pos) / rate : (v.pos - (double) v.start) / -rate;
             auto g = v.gain * v.env * (float) std::min (1.0, remaining / declick);
             auto frac = (float) (v.pos - (double) idx);
             auto next = idx + 1 < v.end ? idx + 1 : idx;
@@ -140,7 +150,7 @@ void VoiceEngine::render (juce::AudioBuffer<float>& out, int startSample, int nu
                 out.addSample (ch, startSample + i, (a + frac * (src[next] - a)) * g);
             }
 
-            v.pos += v.rate;
+            v.pos += rate;
         }
 
         if (v.active && (newest == nullptr || v.order > newest->order))

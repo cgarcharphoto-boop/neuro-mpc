@@ -13,6 +13,17 @@ namespace ParamIDs
     inline constexpr auto attack   = "attack";
     inline constexpr auto release  = "release";
     inline constexpr auto playMode = "playMode";
+    inline constexpr auto transpose = "transpose";
+    inline constexpr auto fineTune  = "fineTune";
+    inline constexpr auto bendRange = "bendRange";
+    inline constexpr auto lfoDepth  = "lfoDepth";
+    inline constexpr auto lfoRate   = "lfoRate";
+    inline constexpr auto lfoShape  = "lfoShape";
+    inline constexpr auto lfoSync   = "lfoSync";
+    inline constexpr auto lfoPhase  = "lfoPhase";
+    inline constexpr auto keyMode   = "keyMode";
+    inline constexpr auto scale     = "scale";
+    inline constexpr auto scaleRoot = "scaleRoot";
 }
 
 class NeuroMPCProcessor : public juce::AudioProcessor,
@@ -59,6 +70,14 @@ public:
     const neuro::AnalysisResult* getSliceAnalysis (int sliceIndex) const;
     const neuro::AnalysisResult* getSampleAnalysis() const;
 
+    // Keyboard mode plays one slice chromatically from its root (manual Root, else detected pitch, else C4).
+    void setKeyboardSlice (int sliceIndex);
+    int getKeyboardSlice() const noexcept                       { return keyboardSlice; }
+    float getKeyboardRoot() const noexcept                      { return keyboardRootNote.load(); }
+    bool isKeyboardMode() const noexcept                        { return keyModeParam->load() > 0.5f; }
+    int padNote (int padIndex) const;                           // pad -> MIDI note for the current mode
+    int auditionNote (int sliceIndex);                          // plays a slice at its original pitch in either mode
+
     void processBackgroundResults();            // also driven by the internal timer, so it works with the editor closed
     bool waitForBackgroundWork (int timeoutMs); // for tests and offline use
 
@@ -70,6 +89,8 @@ private:
     void publishSlices();
     void refreshStretch();
     void refreshAnalysis();
+    void updateKeyboardMap();
+    void renderWithModulation (juce::AudioBuffer<float>&, int from, int to);
     void timerCallback() override { processBackgroundResults(); }
 
     std::shared_ptr<const neuro::SampleData> sample;
@@ -104,6 +125,20 @@ private:
     std::atomic<float>* attackParam = nullptr;
     std::atomic<float>* releaseParam = nullptr;
     std::atomic<float>* modeParam = nullptr;
+    std::atomic<float> *transposeParam = nullptr, *fineParam = nullptr, *bendRangeParam = nullptr, *lfoDepthParam = nullptr,
+                       *lfoRateParam = nullptr, *lfoShapeParam = nullptr, *lfoSyncParam = nullptr, *lfoPhaseParam = nullptr,
+                       *keyModeParam = nullptr, *scaleParam = nullptr, *scaleRootParam = nullptr;
+
+    // Audio-thread modulation state
+    double hostSampleRate = 44100.0;
+    std::vector<float> modBuffer = std::vector<float> (1024);
+    float bendSemitones = 0.0f, sampleAndHold = 0.0f;
+    double lfoCyclePos = 0.0, lfoIncrement = 0.0;
+    juce::Random lfoRandom;
+
+    int keyboardSlice = 0; // message thread
+    std::atomic<int> keyboardSliceIndex { 0 };
+    std::atomic<float> keyboardRootNote { 60.0f };
     juce::SmoothedValue<float> gainSmoothed;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (NeuroMPCProcessor)
