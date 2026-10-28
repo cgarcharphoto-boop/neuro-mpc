@@ -34,6 +34,8 @@ private:
     void timerCallback() override;
     void load (const juce::File&);
     void updateInfo();
+    void updateSlicePanel();
+    void setSelectedStretch (float ratio, bool allSlices = false);
 
     using SliderAttachment = juce::AudioProcessorValueTreeState::SliderAttachment;
 
@@ -44,6 +46,12 @@ private:
     juce::ComboBox gridDivisions, playMode;
     juce::Slider gain, attack, release;
     juce::Label info;
+
+    // Selected-slice panel
+    juce::Label sliceTitle, durationInfo, targetSeconds;
+    juce::Slider stretch { juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight };
+    juce::TextButton halfButton { "x0.5" }, doubleButton { "x2" }, resetButton { "1:1" }, allButton { "Apply to all" };
+    juce::ToggleButton preserveTransients { "Preserve transients" };
     std::vector<std::unique_ptr<Pad>> pads;
     std::unique_ptr<SliderAttachment> gainAttachment, attackAttachment, releaseAttachment;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> modeAttachment;

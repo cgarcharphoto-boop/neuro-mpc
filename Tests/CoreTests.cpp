@@ -55,6 +55,18 @@ static void sliceSetTests()
     s.setStarts ({ 9000, 3000, 3010, 0, 20000 });
     CHECK (s.size() == 3); // 3010 too close, 0 and 20000 out of range
 
+    // Stretch is per-slice and clamped.
+    SliceSet st (10000);
+    st.grid (4);
+    CHECK (st.setStretch (1, 2.0f) && st.getSlices()[1].isStretched() && ! st.getSlices()[0].isStretched());
+    CHECK (st.getSlices()[0].timeStretchRatio == 1.0f && st.getSlices()[2].timeStretchRatio == 1.0f);
+    CHECK (st.setStretch (2, 100.0f) && st.getSlices()[2].timeStretchRatio == SliceSet::maxStretch);
+    CHECK (st.setStretch (2, 0.0f) && st.getSlices()[2].timeStretchRatio == SliceSet::minStretch);
+    CHECK (! st.setStretch (4, 2.0f));
+    auto bad = st.getSlices();
+    bad[3].timeStretchRatio = -5.0f;
+    CHECK (st.restore (10000, bad) && st.getSlices()[3].timeStretchRatio == SliceSet::minStretch);
+
     // Settings inherited on split.
     SliceSet t (1000);
     auto copy = t.getSlices();

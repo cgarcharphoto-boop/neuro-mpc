@@ -13,10 +13,12 @@ namespace ParamIDs
     inline constexpr auto playMode = "playMode";
 }
 
-class NeuroMPCProcessor : public juce::AudioProcessor
+class NeuroMPCProcessor : public juce::AudioProcessor,
+                          private juce::Timer
 {
 public:
     NeuroMPCProcessor();
+    ~NeuroMPCProcessor() override;
 
     void prepareToPlay (double sampleRate, int samplesPerBlock) override;
     void releaseResources() override {}
@@ -48,12 +50,19 @@ public:
     int64_t getPlayhead() const noexcept                        { return engine.getPlayhead(); }
     const juce::String& getMissingSamplePath() const noexcept   { return missingSamplePath; }
 
+    enum class StretchStatus { original, rendering, ready };
+    StretchStatus getStretchStatus (int sliceIndex) const;
+    void processStretchResults();              // also driven by the internal timer, so it works with the editor closed
+    bool waitForStretchRenders (int timeoutMs); // for tests and offline use
+
     juce::AudioFormatManager formats;
     juce::AudioProcessorValueTreeState apvts;
 
 private:
     static juce::AudioProcessorValueTreeState::ParameterLayout createLayout();
     void publishSlices();
+    void refreshStretch();
+    void timerCallback() override { processStretchResults(); }
 
     std::shared_ptr<const neuro::SampleData> sample;
     neuro::SliceSet slices;
@@ -63,6 +72,16 @@ private:
     neuro::RtShared<neuro::SampleData> rtSample;
     neuro::RtShared<neuro::SliceSet> rtSlices;
     const neuro::SampleData* lastSample = nullptr;
+    const neuro::StretchBank* lastBank = nullptr;
+
+    static constexpr size_t stretchCacheBudgetBytes = 512u << 20;
+    struct CacheEntry { neuro::StretchEntry entry; uint64_t lastUse = 0; };
+    neuro::StretchRenderer stretchRenderer;
+    neuro::RtShared<neuro::StretchBank> rtStretch;
+    std::shared_ptr<const neuro::StretchBank> stretchBank;
+    std::vector<CacheEntry> stretchCache;
+    std::vector<neuro::StretchKey> stretchRequested;
+    uint64_t cacheClock = 0;
     neuro::VoiceEngine engine;
 
     struct UiNote { int note; float velocity; };

@@ -43,7 +43,10 @@ void NeuroMPCEditor::Pad::mouseUp (const juce::MouseEvent&)
 NeuroMPCEditor::NeuroMPCEditor (NeuroMPCProcessor& p) : AudioProcessorEditor (p), proc (p)
 {
     for (auto* c : std::initializer_list<juce::Component*> { &waveform, &loadButton, &autoButton, &gridButton,
-                                                             &clearButton, &sensitivity, &gridDivisions, &playMode, &info })
+                                                             &clearButton, &sensitivity, &gridDivisions, &playMode, &info,
+                                                             &sliceTitle, &durationInfo, &targetSeconds, &stretch,
+                                                             &halfButton, &doubleButton, &resetButton, &allButton,
+                                                             &preserveTransients })
         addAndMakeVisible (c);
 
     for (int i = 0; i < numPads; ++i)
@@ -90,6 +93,45 @@ NeuroMPCEditor::NeuroMPCEditor (NeuroMPCProcessor& p) : AudioProcessorEditor (p)
 
     gridButton.onClick  = [this] { proc.editSlices ([n = gridDivisions.getSelectedId()] (auto& set) { set.grid (n); }); };
     clearButton.onClick = [this] { proc.editSlices ([] (auto& set) { set.reset (set.getTotalLength()); }); };
+
+    stretch.setRange (neuro::SliceSet::minStretch, neuro::SliceSet::maxStretch, 0.001);
+    stretch.setSkewFactorFromMidPoint (1.0);
+    stretch.setTextValueSuffix (" x");
+    stretch.setTextBoxStyle (juce::Slider::TextBoxRight, false, 70, 20);
+    stretch.setTooltip ("Time-stretch ratio: output duration = original x ratio (pitch preserved)");
+    stretch.onValueChange = [this] { setSelectedStretch ((float) stretch.getValue()); };
+    halfButton.onClick   = [this] { setSelectedStretch ((float) stretch.getValue() * 0.5f); };
+    doubleButton.onClick = [this] { setSelectedStretch ((float) stretch.getValue() * 2.0f); };
+    resetButton.onClick  = [this] { setSelectedStretch (1.0f); };
+    allButton.onClick    = [this] { setSelectedStretch ((float) stretch.getValue(), true); };
+
+    preserveTransients.setTooltip ("Stretch each transient-delimited segment separately: keeps drum attacks tight, no pre-echo");
+    preserveTransients.onClick = [this]
+    {
+        const auto sel = waveform.getSelectedSlice();
+
+        if (sel >= 0 && sel < proc.getSlices().size())
+            proc.editSlices ([sel, on = preserveTransients.getToggleState()] (auto& set) { set.setPreserveTransients (sel, on); });
+    };
+
+    sliceTitle.setFont (juce::FontOptions (14.0f, juce::Font::bold));
+    targetSeconds.setEditable (true);
+    targetSeconds.setTooltip ("Target duration in seconds (sets the ratio)");
+    targetSeconds.setColour (juce::Label::outlineColourId, panel.brighter (0.3f));
+    targetSeconds.onTextChange = [this]
+    {
+        const auto sel = waveform.getSelectedSlice();
+        auto sample = proc.getSample();
+
+        if (sample != nullptr && sel >= 0 && sel < proc.getSlices().size())
+        {
+            const auto original = (double) proc.getSlices().getSlices()[(size_t) sel].length() / sample->sampleRate;
+            const auto target = targetSeconds.getText().getDoubleValue();
+
+            if (target > 0.0 && original > 0.0)
+                setSelectedStretch ((float) (target / original));
+        }
+    };
 
     info.setColour (juce::Label::textColourId, juce::Colours::white.withAlpha (0.7f));
     info.setJustificationType (juce::Justification::topLeft);
@@ -138,6 +180,56 @@ void NeuroMPCEditor::updateInfo()
     info.setText (text, juce::dontSendNotification);
 }
 
+void NeuroMPCEditor::setSelectedStretch (float ratio, bool allSlices)
+{
+    const auto sel = waveform.getSelectedSlice();
+
+    if (sel < 0 || sel >= proc.getSlices().size())
+        return;
+
+    proc.editSlices ([&] (auto& set)
+    {
+        for (int i = 0; i < set.size(); ++i)
+            if (allSlices || i == sel)
+                set.setStretch (i, ratio);
+    });
+
+    updateSlicePanel();
+}
+
+void NeuroMPCEditor::updateSlicePanel()
+{
+    const auto sel = waveform.getSelectedSlice();
+    auto sample = proc.getSample();
+    const auto valid = sample != nullptr && sel >= 0 && sel < proc.getSlices().size();
+
+    for (auto* c : std::initializer_list<juce::Component*> { &stretch, &halfButton, &doubleButton, &resetButton, &allButton,
+                                                             &targetSeconds, &preserveTransients })
+        c->setEnabled (valid);
+
+    if (! valid)
+    {
+        sliceTitle.setText ("Select a slice", juce::dontSendNotification);
+        durationInfo.setText ({}, juce::dontSendNotification);
+        return;
+    }
+
+    const auto& slice = proc.getSlices().getSlices()[(size_t) sel];
+    const auto original = (double) slice.length() / sample->sampleRate;
+    const auto status = proc.getStretchStatus (sel);
+
+    sliceTitle.setText ("SLICE " + juce::String (sel + 1) + "  (pad " + juce::String (sel + 1) + ")", juce::dontSendNotification);
+    stretch.setValue (slice.timeStretchRatio, juce::dontSendNotification);
+    preserveTransients.setToggleState (slice.preserveTransients, juce::dontSendNotification);
+    durationInfo.setText (juce::String (original, 3) + " s  ->  " + juce::String (original * slice.timeStretchRatio, 3) + " s   "
+                              + (status == NeuroMPCProcessor::StretchStatus::rendering ? "rendering..."
+                                 : status == NeuroMPCProcessor::StretchStatus::ready ? "stretched" : "original"),
+                          juce::dontSendNotification);
+
+    if (! targetSeconds.isBeingEdited())
+        targetSeconds.setText (juce::String (original * slice.timeStretchRatio, 3), juce::dontSendNotification);
+}
+
 void NeuroMPCEditor::timerCallback()
 {
     if (shownSampleVersion != proc.getSampleVersion())
@@ -159,6 +251,7 @@ void NeuroMPCEditor::timerCallback()
     }
 
     updateInfo();
+    updateSlicePanel();
     waveform.repaint();
 }
 
@@ -205,10 +298,30 @@ void NeuroMPCEditor::resized()
                                          .toNearestInt());
 
     bottom.removeFromLeft (16);
-    auto knobs = bottom.removeFromTop (110);
+    auto knobs = bottom.removeFromTop (100);
 
     for (auto* k : { &gain, &attack, &release })
         k->setBounds (knobs.removeFromLeft (90));
 
-    info.setBounds (bottom.reduced (0, 6));
+    auto slicePanel = bottom.removeFromTop (88);
+    sliceTitle.setBounds (slicePanel.removeFromTop (22));
+    auto row = slicePanel.removeFromTop (28);
+    stretch.setBounds (row.removeFromLeft (juce::jmin (320, row.getWidth() - 220)));
+
+    for (auto* b : { &halfButton, &doubleButton, &resetButton })
+    {
+        row.removeFromLeft (4);
+        b->setBounds (row.removeFromLeft (44));
+    }
+
+    row.removeFromLeft (4);
+    allButton.setBounds (row.removeFromLeft (84));
+    slicePanel.removeFromTop (6);
+    auto row2 = slicePanel.removeFromTop (24);
+    targetSeconds.setBounds (row2.removeFromLeft (70));
+    row2.removeFromLeft (8);
+    preserveTransients.setBounds (row2.removeFromLeft (150));
+    durationInfo.setBounds (row2);
+
+    info.setBounds (bottom.reduced (0, 4));
 }

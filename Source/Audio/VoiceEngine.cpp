@@ -10,7 +10,7 @@ void VoiceEngine::prepare (double hostSampleRate) noexcept
 }
 
 void VoiceEngine::noteOn (int note, float velocity, const SampleData& sample, const SliceSet& slices,
-                          const VoiceParams& params) noexcept
+                          const StretchBank* bank, const VoiceParams& params) noexcept
 {
     auto index = note - baseNote;
 
@@ -25,6 +25,21 @@ void VoiceEngine::noteOn (int note, float velocity, const SampleData& sample, co
     if (! slice.enabled || end - start < 2)
         return;
 
+    const auto* src = &sample.buffer;
+    const auto displayOffset = start;
+    auto displayScale = 1.0;
+
+    if (bank != nullptr && slice.isStretched())
+    {
+        if (const auto* entry = bank->find (slice); entry != nullptr && entry->audio->getNumSamples() >= 2)
+        {
+            src = entry->audio.get();
+            start = 0;
+            end = src->getNumSamples();
+            displayScale = 1.0 / slice.timeStretchRatio;
+        }
+    }
+
     auto* v = &voices[0];
 
     for (auto& candidate : voices)
@@ -33,12 +48,15 @@ void VoiceEngine::noteOn (int note, float velocity, const SampleData& sample, co
         if (candidate.order < v->order) v = &candidate; // steal the oldest
     }
 
-    // Resampling playback: pitch changes duration. Pitch-preserving shift/stretch arrive in Phases 6 and 8.
+    // Pitch is resampling-based (changes duration); pitch-preserving shift arrives in Phase 8.
     auto rate = sample.sampleRate / hostRate * std::pow (2.0, (double) slice.pitchSemitones / 12.0);
 
     v->active = true;
     v->releasing = false;
     v->note = note;
+    v->src = src;
+    v->displayOffset = displayOffset;
+    v->displayScale = displayScale;
     v->start = start;
     v->end = end;
     v->rate = slice.reverse ? -rate : rate;
@@ -68,16 +86,23 @@ void VoiceEngine::killAll() noexcept
     playhead.store (-1, std::memory_order_relaxed);
 }
 
-void VoiceEngine::render (juce::AudioBuffer<float>& out, int startSample, int numSamples,
-                          const SampleData& sample) noexcept
+void VoiceEngine::dropVoicesNotIn (const StretchBank* bank, const juce::AudioBuffer<float>* sampleBuffer) noexcept
+{
+    for (auto& v : voices)
+        if (v.active && v.src != sampleBuffer && (bank == nullptr || ! bank->contains (v.src)))
+            v.active = false;
+}
+
+void VoiceEngine::render (juce::AudioBuffer<float>& out, int startSample, int numSamples) noexcept
 {
     constexpr double declick = 64.0; // samples of fade before a slice's end
-    const auto srcChannels = sample.buffer.getNumChannels();
     const auto outChannels = out.getNumChannels();
     const Voice* newest = nullptr;
 
     for (auto& v : voices)
     {
+        const auto srcChannels = v.active ? v.src->getNumChannels() : 0;
+
         for (int i = 0; i < numSamples && v.active; ++i)
         {
             auto idx = (int64_t) std::floor (v.pos);
@@ -110,7 +135,7 @@ void VoiceEngine::render (juce::AudioBuffer<float>& out, int startSample, int nu
 
             for (int ch = 0; ch < outChannels; ++ch)
             {
-                const auto* src = sample.buffer.getReadPointer (std::min (ch, srcChannels - 1));
+                const auto* src = v.src->getReadPointer (std::min (ch, srcChannels - 1));
                 auto a = src[idx];
                 out.addSample (ch, startSample + i, (a + frac * (src[next] - a)) * g);
             }
@@ -122,7 +147,8 @@ void VoiceEngine::render (juce::AudioBuffer<float>& out, int startSample, int nu
             newest = &v;
     }
 
-    playhead.store (newest != nullptr ? (int64_t) newest->pos : -1, std::memory_order_relaxed);
+    playhead.store (newest != nullptr ? newest->displayOffset + (int64_t) ((newest->pos - (double) newest->start) * newest->displayScale) : -1,
+                    std::memory_order_relaxed);
 }
 
 } // namespace neuro

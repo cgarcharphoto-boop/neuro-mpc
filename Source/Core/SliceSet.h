@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <vector>
 
@@ -16,11 +17,13 @@ struct SliceDefinition
 
     float gain = 1.0f;
     float pitchSemitones = 0.0f;
-    float timeStretchRatio = 1.0f; // 1.0 = original duration, 2.0 = twice as long (Phase 6)
+    float timeStretchRatio = 1.0f; // 1.0 = original duration, 2.0 = twice as long
+    bool preserveTransients = true; // stretch each transient-delimited segment separately (no pre-echo)
     bool reverse = false;
     bool enabled = true;
 
     int64_t length() const noexcept { return endSample - startSample; }
+    bool isStretched() const noexcept { return std::abs (timeStretchRatio - 1.0f) > 1.0e-4f; }
 };
 
 // Contiguous, non-overlapping slices covering [0, totalLength).
@@ -29,6 +32,7 @@ class SliceSet
 {
 public:
     static constexpr int64_t minSliceLength = 64;
+    static constexpr float minStretch = 0.25f, maxStretch = 4.0f;
 
     SliceSet() = default;
     explicit SliceSet (int64_t total) { reset (total); }
@@ -96,6 +100,25 @@ public:
         return true;
     }
 
+    // Output duration = original duration * ratio. Affects only slice i.
+    bool setStretch (int i, float ratio)
+    {
+        if (i < 0 || i >= size())
+            return false;
+
+        slices[(size_t) i].timeStretchRatio = std::clamp (ratio, minStretch, maxStretch);
+        return true;
+    }
+
+    bool setPreserveTransients (int i, bool preserve)
+    {
+        if (i < 0 || i >= size())
+            return false;
+
+        slices[(size_t) i].preserveTransients = preserve;
+        return true;
+    }
+
     // Removes the boundary at the start of slice i (i >= 1), merging it into the previous slice.
     bool mergeWithPrevious (int i)
     {
@@ -139,7 +162,8 @@ public:
 
         for (size_t i = 0; i < restored.size(); ++i)
         {
-            const auto& s = restored[i];
+            auto& s = restored[i];
+            s.timeStretchRatio = std::clamp (s.timeStretchRatio, minStretch, maxStretch);
 
             if (s.id <= 0 || s.length() < minSliceLength || (i > 0 && restored[i - 1].endSample != s.startSample))
                 return false;

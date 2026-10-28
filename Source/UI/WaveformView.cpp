@@ -101,6 +101,10 @@ void WaveformView::paint (juce::Graphics& g)
             g.drawVerticalLine ((int) x, 0.0f, h);
 
         g.drawText (juce::String ((int) i + 1), (int) x + 3, 0, 30, 14, juce::Justification::left);
+
+        if (slices[i].isStretched())
+            g.drawText ("x" + juce::String (slices[i].timeStretchRatio, 2), (int) x + 3, getHeight() - 14, 50, 14,
+                        juce::Justification::left);
     }
 
     if (auto ph = proc.getPlayhead(); ph >= 0)

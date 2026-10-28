@@ -2,6 +2,7 @@
 
 #include "SampleData.h"
 #include "../Core/SliceSet.h"
+#include "../DSP/TimeStretch.h"
 #include <array>
 #include <atomic>
 
@@ -23,12 +24,15 @@ public:
     static constexpr int baseNote = 36; // C1 -> slice 1, MPC pad convention
 
     void prepare (double hostSampleRate) noexcept;
-    void noteOn (int note, float velocity, const SampleData&, const SliceSet&, const VoiceParams&) noexcept;
+    // Plays the slice's rendered stretch from the bank when available, otherwise the original region.
+    void noteOn (int note, float velocity, const SampleData&, const SliceSet&, const StretchBank*, const VoiceParams&) noexcept;
     void noteOff (int note) noexcept;
     void killAll() noexcept;
-    void render (juce::AudioBuffer<float>& out, int startSample, int numSamples, const SampleData&) noexcept;
+    // Stops voices reading stretch buffers that are no longer in the published bank (they may be freed).
+    void dropVoicesNotIn (const StretchBank*, const juce::AudioBuffer<float>* sampleBuffer) noexcept;
+    void render (juce::AudioBuffer<float>& out, int startSample, int numSamples) noexcept;
 
-    // Any thread: source position of the most recently started active voice, or -1.
+    // Any thread: original-sample position of the most recently started active voice, or -1.
     int64_t getPlayhead() const noexcept { return playhead.load (std::memory_order_relaxed); }
 
 private:
@@ -36,6 +40,9 @@ private:
     {
         bool active = false, releasing = false;
         int note = -1;
+        const juce::AudioBuffer<float>* src = nullptr;
+        int64_t displayOffset = 0; // maps pos back to original-sample coordinates for the playhead
+        double displayScale = 1.0;
         int64_t start = 0, end = 0;
         double pos = 0.0, rate = 1.0;
         float gain = 0.0f, env = 0.0f, attackStep = 1.0f, releaseStep = 1.0f;

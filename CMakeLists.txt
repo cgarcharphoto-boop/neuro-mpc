@@ -19,6 +19,10 @@ endif()
 
 add_subdirectory("${JUCE_PATH}" JUCE)
 
+# Vendored, MIT: Signalsmith Linear 0.6.4 (de55e6a), Signalsmith Stretch 1.4.0 (a670068). See Documentation/LICENSES.md.
+add_subdirectory(ThirdParty/signalsmith-linear SYSTEM)
+add_subdirectory(ThirdParty/signalsmith-stretch SYSTEM)
+
 juce_add_plugin(NEURO_MPC
     COMPANY_NAME "NEURO MPC"
     BUNDLE_ID "org.neurompc.neurompc"
@@ -38,6 +42,7 @@ target_sources(NEURO_MPC PRIVATE
     Source/PluginProcessor.cpp
     Source/PluginEditor.cpp
     Source/Audio/VoiceEngine.cpp
+    Source/DSP/TimeStretch.cpp
     Source/UI/WaveformView.cpp)
 
 target_include_directories(NEURO_MPC PRIVATE Source)
@@ -52,6 +57,7 @@ target_link_libraries(NEURO_MPC
         juce::juce_audio_utils
         juce::juce_audio_processors
         juce::juce_dsp
+        signalsmith-stretch
     PUBLIC
         juce::juce_recommended_config_flags
         juce::juce_recommended_lto_flags
@@ -71,6 +77,7 @@ target_sources(neuro_engine_tests PRIVATE
     Source/PluginProcessor.cpp
     Source/PluginEditor.cpp
     Source/Audio/VoiceEngine.cpp
+    Source/DSP/TimeStretch.cpp
     Source/UI/WaveformView.cpp)
 target_include_directories(neuro_engine_tests PRIVATE Source)
 target_compile_definitions(neuro_engine_tests PRIVATE
@@ -81,6 +88,7 @@ target_link_libraries(neuro_engine_tests PRIVATE
     juce::juce_audio_utils
     juce::juce_audio_processors
     juce::juce_dsp
+    signalsmith-stretch
     juce::juce_recommended_config_flags
     juce::juce_recommended_warning_flags)
 add_test(NAME engine COMMAND neuro_engine_tests)
