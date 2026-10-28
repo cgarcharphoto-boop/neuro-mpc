@@ -2,6 +2,7 @@
 
 #include "PluginProcessor.h"
 #include "UI/GesturePad.h"
+#include "UI/SeqGrid.h"
 #include "UI/WaveformView.h"
 
 class NeuroMPCEditor : public juce::AudioProcessorEditor,
@@ -43,10 +44,13 @@ private:
     void setSelectedPitch (float semitones);
     float selectedRoot() const; // reference for the 12-note selector
     void selectPad (int padIndex);
-    enum class Panel { slice, pad, arp, gen };
+    enum class Panel { slice, pad, arp, gen, seq };
     void showPanel (Panel);
     void updateArpPanel();
     void updateGenPanel();
+    void updateSeqPanel();
+    void editSelectedSeqStep (const std::function<void (neuro::SeqStep&)>&);
+    std::vector<juce::Component*> seqPanelComponents();
     std::vector<juce::Component*> arpPanelComponents();
     std::vector<juce::Component*> genPanelComponents();
     void updatePadPanel();
@@ -87,7 +91,7 @@ private:
     std::vector<std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment>> comboAttachments;
     std::vector<std::unique_ptr<Pad>> pads;
     std::array<juce::TextButton, neuro::numBanks> bankButtons;
-    juce::TextButton sliceTab { "SLICE" }, padTab { "PAD" }, arpTab { "ARP" }, genTab { "GEN" };
+    juce::TextButton sliceTab { "SLICE" }, padTab { "PAD" }, arpTab { "ARP" }, genTab { "GEN" }, seqTab { "SEQ" };
     int currentBank = 0, selectedPad = 0, copiedPad = -1, learnBaseline = -1, shownSliceCount = -1;
     Panel activePanel = Panel::slice;
 
@@ -124,6 +128,21 @@ private:
     juce::TextButton euclidButton { "Euclid" }, allOnButton { "All on" }, addRule { "Add" }, removeRule { "Remove last" },
                      clearRules { "Clear rules" };
     juce::ComboBox ruleWhen, ruleAction, grammarPresets;
+
+    // Step sequencer panel
+    SeqGrid seqGrid { proc };
+    juce::Label seqTitle, seqName, seqInfo;
+    juce::ComboBox seqPatternBox, seqModeBox, seqRateBox, laneNote;
+    juce::Slider seqSwing { juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight },
+                 stepVelocity { juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight },
+                 stepGate { juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight },
+                 stepChance { juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight },
+                 stepRatchet { juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight },
+                 stepMicro { juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight },
+                 stepPitch { juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight },
+                 laneLength { juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight };
+    juce::TextButton seqDuplicate { "Duplicate" }, seqClear { "Clear" }, lanePageButton { "Lanes 1-8" };
+    std::array<juce::TextButton, 4> stepPageButtons;
 
     // Selected-pad panel
     juce::Label padTitle, padName;

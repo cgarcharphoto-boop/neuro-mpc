@@ -166,7 +166,7 @@ NeuroMPCEditor::NeuroMPCEditor (NeuroMPCProcessor& p) : AudioProcessorEditor (p)
 
     bankButtons[0].setToggleState (true, juce::dontSendNotification);
 
-    for (auto* tab : { &sliceTab, &padTab, &arpTab, &genTab })
+    for (auto* tab : { &sliceTab, &padTab, &arpTab, &genTab, &seqTab })
     {
         tab->setRadioGroupId (2);
         tab->setClickingTogglesState (true);
@@ -178,6 +178,120 @@ NeuroMPCEditor::NeuroMPCEditor (NeuroMPCProcessor& p) : AudioProcessorEditor (p)
     padTab.onClick   = [this] { showPanel (Panel::pad); };
     arpTab.onClick   = [this] { showPanel (Panel::arp); };
     genTab.onClick   = [this] { showPanel (Panel::gen); };
+    seqTab.onClick   = [this] { showPanel (Panel::seq); };
+
+    // ---- Sequencer panel ----
+    for (auto* c : seqPanelComponents())
+        addAndMakeVisible (c);
+
+    seqTitle.setText ("SEQUENCER", juce::dontSendNotification);
+    seqTitle.setFont (juce::FontOptions (14.0f, juce::Font::bold));
+
+    for (int i = 1; i <= NeuroMPCProcessor::numSeqPatterns; ++i)
+        seqPatternBox.addItem ("Pattern " + juce::String (i), i);
+
+    seqModeBox.addItemList ({ "Seq: off", "Seq: host transport", "Seq: free running" }, 1);
+    seqRateBox.addItemList ({ "1/4", "1/8", "1/8T", "1/16", "1/16T", "1/32" }, 1);
+
+    for (auto [box, id] : std::initializer_list<std::pair<juce::ComboBox*, const char*>> {
+             { &seqPatternBox, ParamIDs::seqPattern }, { &seqModeBox, ParamIDs::seqMode }, { &seqRateBox, ParamIDs::seqRate } })
+        comboAttachments.push_back (std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment> (proc.apvts, id, *box));
+
+    sliderAttachments.push_back (std::make_unique<SliderAttachment> (proc.apvts, ParamIDs::seqSwing, seqSwing));
+    seqPatternBox.onChange = [this] { updateSeqPanel(); };
+
+    seqName.setEditable (true);
+    seqName.setColour (juce::Label::outlineColourId, panel.brighter (0.3f));
+    seqName.setTooltip ("Pattern name (double-click to edit)");
+    seqName.onTextChange = [this]
+    {
+        proc.editSeqPattern (proc.getSelectedSeqPattern(), [t = seqName.getText().toStdString()] (auto& pat) { pat.name = t; });
+    };
+
+    seqDuplicate.setTooltip ("Copy this pattern to the next empty slot and select it");
+    seqDuplicate.onClick = [this]
+    {
+        const auto current = proc.getSelectedSeqPattern();
+
+        for (int i = 1; i < NeuroMPCProcessor::numSeqPatterns; ++i)
+        {
+            const auto target = (current + i) % NeuroMPCProcessor::numSeqPatterns;
+
+            if (proc.getSeqPattern (target).isEmpty())
+            {
+                const auto copy = proc.getSeqPattern (current);
+                proc.editSeqPattern (target, [&copy] (auto& pat) { pat = copy; });
+                seqPatternBox.setSelectedId (target + 1); // updates the parameter through the attachment
+                return;
+            }
+        }
+    };
+    seqClear.onClick = [this] { proc.editSeqPattern (proc.getSelectedSeqPattern(), [] (auto& pat) { pat = {}; }); updateSeqPanel(); };
+
+    for (int i = 0; i < 4; ++i)
+    {
+        auto& b = stepPageButtons[(size_t) i];
+        b.setButtonText (juce::String (i * 16 + 1) + "-" + juce::String (i * 16 + 16));
+        b.setRadioGroupId (3);
+        b.setClickingTogglesState (true);
+        b.setColour (juce::TextButton::buttonOnColourId, accent.darker (0.3f));
+        b.onClick = [this, i] { seqGrid.stepPage = i; seqGrid.repaint(); };
+    }
+
+    stepPageButtons[0].setToggleState (true, juce::dontSendNotification);
+    lanePageButton.onClick = [this]
+    {
+        seqGrid.lanePage = 1 - seqGrid.lanePage;
+        lanePageButton.setButtonText (seqGrid.lanePage == 0 ? "Lanes 1-8" : "Lanes 9-16");
+        seqGrid.repaint();
+    };
+    seqGrid.onSelectionChanged = [this] { updateSeqPanel(); };
+
+    stepVelocity.setRange (1, 127, 1);
+    stepGate.setRange (5, 100, 1);
+    stepGate.setTextValueSuffix (" %");
+    stepChance.setRange (0, 100, 1);
+    stepChance.setTextValueSuffix (" %");
+    stepRatchet.setRange (1, 4, 1);
+    stepMicro.setRange (-50, 50, 1);
+    stepMicro.setTextValueSuffix (" %");
+    stepMicro.setTooltip ("Microtiming: shift this step early/late by up to half a step");
+    stepPitch.setRange (-24, 24, 0.01);
+    stepPitch.setTextValueSuffix (" st");
+    stepVelocity.onValueChange = [this] { editSelectedSeqStep ([v = (float) stepVelocity.getValue() / 127.0f] (auto& st) { st.velocity = v; }); };
+    stepGate.onValueChange     = [this] { editSelectedSeqStep ([v = (float) stepGate.getValue() / 100.0f] (auto& st) { st.gate = v; }); };
+    stepChance.onValueChange   = [this] { editSelectedSeqStep ([v = (float) stepChance.getValue() / 100.0f] (auto& st) { st.probability = v; }); };
+    stepRatchet.onValueChange  = [this] { editSelectedSeqStep ([v = (int) stepRatchet.getValue()] (auto& st) { st.ratchet = v; }); };
+    stepMicro.onValueChange    = [this] { editSelectedSeqStep ([v = (float) stepMicro.getValue() / 100.0f] (auto& st) { st.micro = v; }); };
+    stepPitch.onValueChange    = [this] { editSelectedSeqStep ([v = (float) stepPitch.getValue()] (auto& st) { st.pitch = v; }); };
+
+    for (int note = 0; note < 128; ++note)
+        laneNote.addItem ("Lane note: " + juce::MidiMessage::getMidiNoteName (note, true, true, 3), note + 1);
+
+    laneNote.setTooltip ("Note this lane plays (pads mode: the pad on that note)");
+    laneNote.onChange = [this]
+    {
+        proc.editSeqPattern (proc.getSelectedSeqPattern(), [this, n = laneNote.getSelectedId() - 1] (auto& pat)
+                             { pat.lanes[(size_t) seqGrid.selectedLane].note = n; });
+    };
+    laneLength.setRange (1, neuro::SeqLane::maxSteps, 1);
+    laneLength.setTooltip ("Steps in this lane; lanes of different lengths run as polymeters");
+    laneLength.onValueChange = [this]
+    {
+        proc.editSeqPattern (proc.getSelectedSeqPattern(), [this, n = (int) laneLength.getValue()] (auto& pat)
+                             { pat.lanes[(size_t) seqGrid.selectedLane].length = n; });
+    };
+
+    for (auto [slider, name] : std::initializer_list<std::pair<juce::Slider*, const char*>> {
+             { &seqSwing, "Swing" }, { &stepVelocity, "Vel" }, { &stepGate, "Gate" }, { &stepChance, "Chance" },
+             { &stepRatchet, "Ratchet" }, { &stepMicro, "Micro" }, { &stepPitch, "Pitch" }, { &laneLength, "Length" } })
+    {
+        slider->setTextBoxStyle (juce::Slider::TextBoxRight, false, 52, 20);
+        auto label = std::make_unique<juce::Label> (name, name);
+        label->setFont (juce::FontOptions (11.0f));
+        label->attachToComponent (slider, true);
+        knobLabels.push_back (std::move (label));
+    }
     waveform.onSliceClicked = [this] { if (activePanel == Panel::slice || activePanel == Panel::pad) showPanel (Panel::slice); };
 
     // ---- Generative panel ----
@@ -637,6 +751,50 @@ std::vector<juce::Component*> NeuroMPCEditor::genPanelComponents()
     return list;
 }
 
+std::vector<juce::Component*> NeuroMPCEditor::seqPanelComponents()
+{
+    std::vector<juce::Component*> list { &seqGrid, &seqTitle, &seqName, &seqInfo, &seqPatternBox, &seqModeBox, &seqRateBox,
+                                         &laneNote, &seqSwing, &stepVelocity, &stepGate, &stepChance, &stepRatchet, &stepMicro,
+                                         &stepPitch, &laneLength, &seqDuplicate, &seqClear, &lanePageButton };
+
+    for (auto& b : stepPageButtons)
+        list.push_back (&b);
+
+    return list;
+}
+
+void NeuroMPCEditor::editSelectedSeqStep (const std::function<void (neuro::SeqStep&)>& fn)
+{
+    proc.editSeqPattern (proc.getSelectedSeqPattern(), [this, &fn] (auto& pat)
+                         { fn (pat.lanes[(size_t) seqGrid.selectedLane].steps[(size_t) seqGrid.selectedStep]); });
+    seqGrid.repaint();
+}
+
+void NeuroMPCEditor::updateSeqPanel()
+{
+    const auto& pat = proc.getSeqPattern (proc.getSelectedSeqPattern());
+    const auto& lane = pat.lanes[(size_t) seqGrid.selectedLane];
+    const auto& st = lane.steps[(size_t) seqGrid.selectedStep];
+
+    if (! seqName.isBeingEdited())
+        seqName.setText (pat.name.empty() ? juce::String ("(unnamed)") : juce::String (pat.name), juce::dontSendNotification);
+
+    for (auto [slider, value] : std::initializer_list<std::pair<juce::Slider*, double>> {
+             { &stepVelocity, std::round (st.velocity * 127.0f) }, { &stepGate, std::round (st.gate * 100.0f) },
+             { &stepChance, std::round (st.probability * 100.0f) }, { &stepRatchet, st.ratchet },
+             { &stepMicro, std::round (st.micro * 100.0f) }, { &stepPitch, st.pitch }, { &laneLength, lane.length } })
+        if (! slider->isMouseButtonDown())
+            slider->setValue (value, juce::dontSendNotification);
+
+    laneNote.setSelectedId (lane.note + 1, juce::dontSendNotification);
+
+    const auto playStep = proc.getSeqPlayStep();
+    seqInfo.setText ("Lane " + juce::String (seqGrid.selectedLane + 1) + ", step " + juce::String (seqGrid.selectedStep + 1)
+                         + (st.on ? "" : " (off)") + (playStep >= 0 ? "   playing" : "   stopped"),
+                     juce::dontSendNotification);
+    seqGrid.repaint();
+}
+
 void NeuroMPCEditor::updateGenPanel()
 {
     const auto& p = proc.getArpProgram();
@@ -670,17 +828,20 @@ void NeuroMPCEditor::showPanel (Panel p)
     for (auto* c : padPanelComponents())   c->setVisible (p == Panel::pad);
     for (auto* c : arpPanelComponents())   c->setVisible (p == Panel::arp);
     for (auto* c : genPanelComponents())   c->setVisible (p == Panel::gen);
+    for (auto* c : seqPanelComponents())   c->setVisible (p == Panel::seq);
 
-    info.setVisible (p != Panel::gen); // the generative panel uses the info area too
+    info.setVisible (p != Panel::gen && p != Panel::seq); // these panels use the info area too
 
     sliceTab.setToggleState (p == Panel::slice, juce::dontSendNotification);
     padTab.setToggleState (p == Panel::pad, juce::dontSendNotification);
     arpTab.setToggleState (p == Panel::arp, juce::dontSendNotification);
     genTab.setToggleState (p == Panel::gen, juce::dontSendNotification);
+    seqTab.setToggleState (p == Panel::seq, juce::dontSendNotification);
 
     if (p == Panel::pad) updatePadPanel();
     if (p == Panel::arp) updateArpPanel();
     if (p == Panel::gen) updateGenPanel();
+    if (p == Panel::seq) updateSeqPanel();
 }
 
 void NeuroMPCEditor::updateArpPanel()
@@ -862,6 +1023,7 @@ void NeuroMPCEditor::timerCallback()
     if (activePanel == Panel::pad) updatePadPanel();
     if (activePanel == Panel::arp) updateArpPanel();
     if (activePanel == Panel::arp) gesturePad.repaint();
+    if (activePanel == Panel::seq) updateSeqPanel();
 
     updateInfo();
     updateSlicePanel();
@@ -946,6 +1108,7 @@ void NeuroMPCEditor::resized()
     padTab.setBounds (tabs.removeFromLeft (70));
     arpTab.setBounds (tabs.removeFromLeft (70));
     genTab.setBounds (tabs.removeFromLeft (70));
+    seqTab.setBounds (tabs.removeFromLeft (70));
     bottom.removeFromTop (6);
     const auto panelArea = bottom.removeFromTop (142);
 
@@ -1051,6 +1214,54 @@ void NeuroMPCEditor::resized()
 
         gp.removeFromTop (6);
         rulesList.setBounds (gp);
+    }
+
+    // Sequencer panel: also uses the info area.
+    {
+        auto qp = panelArea.withBottom (bottom.getBottom());
+        auto r0 = qp.removeFromTop (24);
+
+        for (auto [c, w] : std::initializer_list<std::pair<juce::Component*, int>> {
+                 { &seqTitle, 96 }, { &seqPatternBox, 104 }, { &seqName, 120 }, { &seqDuplicate, 80 }, { &seqClear, 56 },
+                 { &seqModeBox, 150 }, { &seqRateBox, 70 } })
+        {
+            c->setBounds (r0.removeFromLeft (w));
+            r0.removeFromLeft (6);
+        }
+
+        r0.removeFromLeft (44);
+        seqSwing.setBounds (r0);
+
+        qp.removeFromTop (6);
+        auto r1 = qp.removeFromTop (22);
+
+        for (auto& b : stepPageButtons)
+            b.setBounds (r1.removeFromLeft (60).reduced (1, 0));
+
+        r1.removeFromLeft (8);
+        lanePageButton.setBounds (r1.removeFromLeft (90));
+        r1.removeFromLeft (12);
+        seqInfo.setBounds (r1);
+
+        auto editorRow = qp.removeFromBottom (24);
+        auto laneRow = editorRow;
+        qp.removeFromBottom (6);
+        auto stepRow = qp.removeFromBottom (24);
+        qp.removeFromBottom (6);
+        qp.removeFromTop (6);
+        seqGrid.setBounds (qp);
+
+        const auto cellWidth = (stepRow.getWidth() - 6 * 52) / 6;
+
+        for (auto* sld : { &stepVelocity, &stepGate, &stepChance, &stepRatchet, &stepMicro, &stepPitch })
+        {
+            stepRow.removeFromLeft (52);
+            sld->setBounds (stepRow.removeFromLeft (cellWidth));
+        }
+
+        laneNote.setBounds (laneRow.removeFromLeft (190));
+        laneRow.removeFromLeft (56);
+        laneLength.setBounds (laneRow.removeFromLeft (220));
     }
 
     auto ap = panelArea;

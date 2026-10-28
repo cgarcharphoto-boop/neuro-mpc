@@ -10,24 +10,24 @@ void VoiceEngine::prepare (double hostSampleRate) noexcept
 }
 
 void VoiceEngine::noteOn (int note, float velocity, const SampleData& sample, const SliceSet& slices,
-                          const StretchBank* bank, const PadMap* pads, const VoiceParams& params) noexcept
+                          const StretchBank* bank, const PadMap* pads, const VoiceParams& params, float pitchOffset) noexcept
 {
     velocity = juce::jlimit (0.0f, 1.0f, velocity);
 
     if (params.keyboardMode)
     {
         const auto offset = (float) (snapToScale (note, params.scaleMask, params.scaleRoot) - (double) params.keyboardRoot);
-        playSlice (params.keyboardSlice, note, velocity, offset, 0, sample, slices, bank, params);
+        playSlice (params.keyboardSlice, note, velocity, offset + pitchOffset, 0, sample, slices, bank, params);
     }
     else if (pads == nullptr)
     {
-        playSlice (note - baseNote, note, velocity, 0.0f, 0, sample, slices, bank, params);
+        playSlice (note - baseNote, note, velocity, pitchOffset, 0, sample, slices, bank, params);
     }
     else
     {
         for (const auto& pad : *pads)
             if (pad.note == note && pad.sliceId > 0)
-                playSlice (slices.indexOfId (pad.sliceId), note, pad.levelFor (velocity), pad.pitch, pad.chokeGroup,
+                playSlice (slices.indexOfId (pad.sliceId), note, pad.levelFor (velocity), pad.pitch + pitchOffset, pad.chokeGroup,
                            sample, slices, bank, params);
     }
 }

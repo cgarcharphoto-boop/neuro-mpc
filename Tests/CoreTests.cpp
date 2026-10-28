@@ -4,6 +4,7 @@
 #include "Core/PitchDetector.h"
 #include "Core/RtShared.h"
 #include "Core/Scales.h"
+#include "Core/Sequencer.h"
 #include "Core/SliceSet.h"
 #include "Core/TransientDetector.h"
 
@@ -653,6 +654,137 @@ static void arpGenerativeTests()
     }
 }
 
+namespace
+{
+    struct SeqEvent { int64_t sample; int note; float velocity; float pitch; };
+
+    // 120 BPM / 48 kHz: 1/16 step = 6000 samples. beatJump > 0 wraps the beat (host loop) at block boundaries.
+    std::vector<SeqEvent> runSeq (const SeqPattern& pattern, SeqTiming timing, int64_t total, int blockSize = 512,
+                                  double beatJump = 0.0, bool flushAtEnd = true)
+    {
+        Sequencer seq;
+        std::vector<SeqEvent> ev;
+        const double bps = 2.0 / 48000.0;
+        int64_t blockStart = 0;
+
+        for (; blockStart < total; blockStart += blockSize)
+        {
+            const auto n = (int) std::min<int64_t> (blockSize, total - blockStart); // exact total, any block size
+            auto beat = blockStart * bps;
+            if (beatJump > 0.0) beat = std::fmod (beat, beatJump);
+            seq.process (pattern, timing, 0, n, beat, bps,
+                         [&] (int o, int note, float v, float p) { ev.push_back ({ blockStart + o, note, v, p }); });
+            seq.endBlock (n);
+        }
+
+        blockStart = total;
+
+        if (flushAtEnd)
+            seq.flush (0, [&] (int o, int n, float v, float p) { ev.push_back ({ blockStart + o, n, v, p }); });
+
+        std::stable_sort (ev.begin(), ev.end(), [] (auto& a, auto& b)
+                          { return a.sample != b.sample ? a.sample < b.sample : (a.velocity == 0.0f) > (b.velocity == 0.0f); });
+        return ev;
+    }
+
+    std::vector<std::pair<int64_t, int>> seqOns (const std::vector<SeqEvent>& ev)
+    {
+        std::vector<std::pair<int64_t, int>> v;
+        for (auto& e : ev) if (e.velocity > 0.0f) v.emplace_back (e.sample, e.note);
+        return v;
+    }
+
+    bool seqBalanced (const std::vector<SeqEvent>& ev)
+    {
+        std::vector<ArpEvent> a;
+        for (auto& e : ev) a.push_back ({ e.sample, e.note, e.velocity });
+        return balanced (a);
+    }
+}
+
+static void sequencerTests()
+{
+    using P = std::pair<int64_t, int>;
+    SeqPattern pat;
+    CHECK (pat.isEmpty() && pat.lanes[0].note == 36 && pat.lanes[3].note == 39);
+
+    // Four on the floor (lane 1) + a step-3 snare (lane 2) in a 16-step bar.
+    for (int i : { 0, 4, 8, 12 }) pat.lanes[0].steps[(size_t) i].on = true;
+    pat.lanes[1].steps[2].on = true;
+    auto ev = runSeq (pat, {}, 96000 * 2);
+    auto on = seqOns (ev);
+    CHECK ((std::vector<P> (on.begin(), on.begin() + 5) == std::vector<P> { { 0, 36 }, { 12000, 37 }, { 24000, 36 }, { 48000, 36 }, { 72000, 36 } }));
+    CHECK (on.size() == 10 && on[5] == P (96000, 36) && seqBalanced (ev));
+    CHECK (ev[1].sample == 3000 && ev[1].velocity == 0.0f); // gate 50%
+
+    // Step attributes: velocity, gate, pitch, ratchet, microtiming (late and early), swing.
+    {
+        SeqPattern p;
+        auto& st = p.lanes[0].steps;
+        st[0] = { true, 0.4f, 1.0f, 1.0f, 1, 0.0f, 7.0f };
+        st[2] = { true, 0.8f, 0.5f, 1.0f, 3, 0.0f, 0.0f };
+        st[4] = { true, 0.8f, 0.5f, 1.0f, 1, 0.25f, 0.0f };
+        st[8] = { true, 0.8f, 0.5f, 1.0f, 1, -0.5f, 0.0f };
+        auto e = runSeq (p, {}, 60000);
+        std::vector<SeqEvent> ons;
+        for (auto& x : e) if (x.velocity > 0.0f) ons.push_back (x);
+        CHECK (ons.size() == 6 && ons[0].velocity == 0.4f && ons[0].pitch == 7.0f && e[1].sample == 6000); // gate 100%
+        CHECK (ons[1].sample == 12000 && ons[2].sample == 14000 && ons[3].sample == 16000);               // ratchet x3
+        CHECK (ons[4].sample == 24000 + 1500);                                                             // +25% late
+        CHECK (ons[5].sample == 48000 - 3000);                                                             // -50% early
+
+        SeqPattern sw;
+        sw.lanes[0].steps[1].on = true;
+        SeqTiming swing;
+        swing.swing = 0.66f;
+        CHECK (seqOns (runSeq (sw, swing, 10000))[0].first == 7920);
+    }
+
+    // Polymeter: a 3-step lane against a 4-step lane realigns every 12 steps.
+    {
+        SeqPattern p;
+        p.lanes[0].length = 3;
+        p.lanes[1].length = 4;
+        p.lanes[0].steps[0].on = p.lanes[1].steps[0].on = true;
+        std::vector<int64_t> a, b;
+        for (auto& [t, n] : seqOns (runSeq (p, {}, 6000 * 13))) (n == 36 ? a : b).push_back (t / 6000);
+        CHECK ((a == std::vector<int64_t> { 0, 3, 6, 9, 12 } && b == std::vector<int64_t> { 0, 4, 8, 12 }));
+    }
+
+    // Probability: reproducible per seed, about the requested ratio, varies between cycles; mute silences a lane.
+    {
+        SeqPattern p;
+        for (int i = 0; i < 16; ++i) p.lanes[0].steps[(size_t) i] = { true, 0.8f, 0.5f, 0.5f, 1, 0.0f, 0.0f };
+        const auto a = seqOns (runSeq (p, {}, 6000 * 400));
+        CHECK (a.size() > 160 && a.size() < 240 && a == seqOns (runSeq (p, {}, 6000 * 400)));
+        SeqTiming other;
+        other.seed = 5;
+        CHECK (a != seqOns (runSeq (p, other, 6000 * 400)));
+        p.lanes[0].mute = true;
+        CHECK (seqOns (runSeq (p, {}, 6000 * 16)).empty());
+    }
+
+    // Robustness: block-size independence and balanced on/off through a 1-bar host loop with everything enabled.
+    {
+        SeqPattern p;
+        p.numLanes = 4;
+        for (int l = 0; l < 4; ++l)
+        {
+            p.lanes[(size_t) l].length = 5 + l * 3;
+            for (int i = 0; i < p.lanes[(size_t) l].length; i += 1 + l)
+                p.lanes[(size_t) l].steps[(size_t) i] = { true, 0.7f, 0.9f, 0.7f, 1 + (i % 4), (float) ((i % 5) - 2) / 5.0f, 0.0f };
+        }
+
+        auto small = runSeq (p, {}, 300000, 53), large = runSeq (p, {}, 300000, 4096);
+        CHECK (small.size() == large.size() && seqBalanced (small) && seqBalanced (large));
+        bool same = small.size() == large.size();
+        for (size_t i = 0; same && i < small.size(); ++i)
+            same = small[i].sample == large[i].sample && small[i].note == large[i].note;
+        CHECK (same);
+        CHECK (seqBalanced (runSeq (p, {}, 300000, 512, 4.0)));
+    }
+}
+
 static void keyTests()
 {
     auto print = [] (const char* name, const KeyEstimate& k)
@@ -701,6 +833,7 @@ int main()
     padTests();
     arpTests();
     arpGenerativeTests();
+    sequencerTests();
     keyTests();
     std::printf (failures == 0 ? "All core tests passed\n" : "%d failure(s)\n", failures);
     return failures == 0 ? EXIT_SUCCESS : EXIT_FAILURE;

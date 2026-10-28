@@ -1,5 +1,6 @@
 #pragma once
 
+#include "NoteTracker.h"
 #include "Scales.h"
 #include <algorithm>
 #include <array>
@@ -151,7 +152,7 @@ public:
 
     const ArpSettings& getSettings() const noexcept { return settings; }
     int heldCount() const noexcept     { return numHeld; }
-    int soundingCount() const noexcept { return numSounding; }
+    int soundingCount() const noexcept { return sounding.count(); }
 
     // Returns true when this note starts a new phrase (first key after none were held, or latch replaced).
     bool noteOn (int note, float velocity) noexcept
@@ -236,25 +237,22 @@ public:
                     continue;
 
                 const auto offset = std::clamp (from + (int) std::llround ((hit - beatAtFrom) / beatsPerSample), from, to - 1);
-                releaseUntil (offset, sink, true);
+                sounding.releaseUntil (offset, true, [&] (int o, int n) { sink (o, n, 0.0f); });
                 emitHit (offset, beatsPerSample, sink);
             }
         }
 
-        releaseUntil (to, sink, false);
+        sounding.releaseUntil (to, false, [&] (int o, int n) { sink (o, n, 0.0f); });
     }
 
     // Call once per block after process(): advances the sample clock used for note-off scheduling.
-    void endBlock (int numSamples) noexcept { blockOrigin += numSamples; }
+    void endBlock (int numSamples) noexcept { sounding.endBlock (numSamples); }
 
     // Emits note-offs for everything sounding (at `offset`). Held notes are kept unless clearHeld.
     template <typename Sink>
     void flush (int offset, Sink&& sink, bool clearHeld) noexcept
     {
-        for (int i = 0; i < numSounding; ++i)
-            sink (offset, sounding[(size_t) i].note, 0.0f);
-
-        numSounding = 0;
+        sounding.flush (offset, [&] (int o, int n) { sink (o, n, 0.0f); });
 
         if (clearHeld)
         {
@@ -265,7 +263,6 @@ public:
 
 private:
     struct Held { int note; float velocity; uint32_t order; };
-    struct Sounding { int note; int64_t endSample; };
     struct Memory { int element; bool rest, accent; int ratchet; };
 
     struct Decision
@@ -560,51 +557,12 @@ private:
     template <typename Sink>
     void emitHit (int offset, double beatsPerSample, Sink& sink) noexcept
     {
-        const auto length = std::max<int64_t> (1, (int64_t) std::llround (settings.gate * settings.stepBeats / decision.ratchet / beatsPerSample));
-        const auto start = blockOrigin + offset;
+        const auto length = (int64_t) std::llround (settings.gate * settings.stepBeats / decision.ratchet / beatsPerSample);
 
         for (int n = 0; n < decision.numNotes; ++n)
         {
-            const auto note = decision.notes[(size_t) n];
-
-            for (int i = 0; i < numSounding; ++i) // retrigger: end the previous instance of this note first
-                if (sounding[(size_t) i].note == note)
-                {
-                    sink (offset, note, 0.0f);
-                    sounding[(size_t) i] = sounding[(size_t) --numSounding];
-                    break;
-                }
-
-            if (numSounding == maxSounding)
-            {
-                sink (offset, sounding[0].note, 0.0f);
-                sounding[0] = sounding[(size_t) --numSounding];
-            }
-
-            sink (offset, note, decision.velocity);
-            sounding[(size_t) numSounding++] = { note, start + length };
-        }
-    }
-
-    // Emits note-offs whose end falls before `offset` (inclusive when `inclusive`, so offs precede a same-sample on).
-    template <typename Sink>
-    void releaseUntil (int offset, Sink& sink, bool inclusive) noexcept
-    {
-        const auto limit = blockOrigin + offset;
-
-        for (int i = 0; i < numSounding;)
-        {
-            const auto end = sounding[(size_t) i].endSample;
-
-            if (inclusive ? end <= limit : end < limit)
-            {
-                sink ((int) std::max<int64_t> (0, end - blockOrigin), sounding[(size_t) i].note, 0.0f);
-                sounding[(size_t) i] = sounding[(size_t) --numSounding];
-            }
-            else
-            {
-                ++i;
-            }
+            sounding.start (decision.notes[(size_t) n], offset, length, [&] (int o, int note) { sink (o, note, 0.0f); });
+            sink (offset, decision.notes[(size_t) n], decision.velocity);
         }
     }
 
@@ -612,14 +570,13 @@ private:
     const ArpProgram* program = nullptr;
     std::array<Held, maxHeld> held {};
     std::array<int, maxHeld * 4 * 2> seq {};
-    std::array<Sounding, maxSounding> sounding {};
+    NoteTracker<maxSounding> sounding;
     std::array<Memory, maxPhrase> memory {};
     Decision decision;
-    int numHeld = 0, physicallyHeld = 0, numSounding = 0, seqLength = 0, position = 0, repeatCount = 0, lastNote = -1;
+    int numHeld = 0, physicallyHeld = 0, seqLength = 0, position = 0, repeatCount = 0, lastNote = -1;
     int stepCounter = 0;
     bool memoryValid = false;
     uint32_t orderCounter = 0, rng = 1;
-    int64_t blockOrigin = 0;
     bool dirty = false;
 };
 

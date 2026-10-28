@@ -5,6 +5,7 @@
 #include "Audio/VoiceEngine.h"
 #include "Core/Arpeggiator.h"
 #include "Core/RtShared.h"
+#include "Core/Sequencer.h"
 #include "DSP/Analysis.h"
 #include "DSP/BackgroundWorker.h"
 
@@ -46,6 +47,10 @@ namespace ParamIDs
     inline constexpr auto arpReturn    = "arpReturn";
     inline constexpr auto arpHumanTime = "arpHumanTime";
     inline constexpr auto arpHumanVel  = "arpHumanVelocity";
+    inline constexpr auto seqMode      = "seqMode";
+    inline constexpr auto seqPattern   = "seqPattern";
+    inline constexpr auto seqRate      = "seqRate";
+    inline constexpr auto seqSwing     = "seqSwing";
 }
 
 class NeuroMPCProcessor : public juce::AudioProcessor,
@@ -92,6 +97,14 @@ public:
     // Arpeggiator rhythm pattern + grammar rules (message thread; published to the audio thread on edit).
     const neuro::ArpProgram& getArpProgram() const noexcept     { return arpProgram; }
     void editArpProgram (const std::function<void (neuro::ArpProgram&)>&);
+
+    // Step sequencer patterns (message thread; all 16 are published to the audio thread on edit).
+    static constexpr int numSeqPatterns = 16;
+    using SeqBank = std::array<neuro::SeqPattern, numSeqPatterns>;
+    const neuro::SeqPattern& getSeqPattern (int index) const    { return seqPatterns[(size_t) juce::jlimit (0, numSeqPatterns - 1, index)]; }
+    void editSeqPattern (int index, const std::function<void (neuro::SeqPattern&)>&);
+    int getSelectedSeqPattern() const noexcept                  { return (int) seqPatternParam->load() - 1; }
+    int64_t getSeqPlayStep() const noexcept                     { return seqPlayStep.load(); } // -1 when stopped
 
     // Arpeggiator live activity for the UI.
     int getArpLastNote() const noexcept                         { return arpLastNote.load(); }
@@ -181,9 +194,16 @@ private:
     struct Event
     {
         enum Type { noteOff, control, noteOn };
-        int offset; Type type; int note; float value; int slice;
+        int offset; Type type; int note; float value; int slice; float pitch;
     };
     neuro::Arpeggiator arp;
+    neuro::Sequencer sequencer;
+    SeqBank seqPatterns;
+    neuro::RtShared<SeqBank> rtSeq;
+    double seqFreeOrigin = 0.0;
+    bool seqWasRunning = false;
+    std::atomic<int64_t> seqPlayStep { -1 };
+    std::atomic<float> *seqModeParam = nullptr, *seqPatternParam = nullptr, *seqRateParam = nullptr, *seqSwingParam = nullptr;
     neuro::ArpProgram arpProgram;
     neuro::RtShared<neuro::ArpProgram> rtArpProgram;
     std::array<Event, 1024> events {};

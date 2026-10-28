@@ -603,12 +603,12 @@ int main()
         setParam (g, ParamIDs::playMode, 1.0f);
         setParam (g, ParamIDs::arpOn, 1.0f);
         // Pattern: step 1 ratchet x2, step 2 rest. Grammar: every 3rd step transposes +1 (pad 36 -> pad 37).
-        g.editArpProgram ([] (auto& p)
+        g.editArpProgram ([] (auto& prog)
         {
-            p.length = 2;
-            p.steps[0].ratchet = 2;
-            p.steps[1].on = false;
-            p.addRule ({ neuro::ArpRule::When::every, 3, 2, neuro::ArpRule::Action::transpose, 1, true });
+            prog.length = 2;
+            prog.steps[0].ratchet = 2;
+            prog.steps[1].on = false;
+            prog.addRule ({ neuro::ArpRule::When::every, 3, 2, neuro::ArpRule::Action::transpose, 1, true });
         });
 
         auto x = capture (g, 70, { { 0, 36, 1.0f } });
@@ -627,6 +627,69 @@ int main()
         const auto& prog = h.getArpProgram();
         CHECK (prog.length == 2 && prog.steps[0].ratchet == 2 && ! prog.steps[1].on && prog.numRules == 1
                && prog.rules[0].offset == 2 && prog.rules[0].amount == 1);
+    }
+
+    // ---- Phase 12: step sequencer through the audio output ----
+    {
+        writeTestWav (wavFile);
+        NeuroMPCProcessor sq;
+        sq.prepareToPlay (rate, block);
+        CHECK (sq.loadSample (wavFile, error));
+        sq.editSlices ([] (auto& s) { s.grid (4); });
+        setParam (sq, ParamIDs::attack, 0.0f);
+        setParam (sq, ParamIDs::release, 1.0f);
+        setParam (sq, ParamIDs::playMode, 1.0f);
+        sq.editSeqPattern (0, [] (auto& pat)
+        {
+            pat.lanes[0].steps[0].on = pat.lanes[0].steps[8].on = true;                // pad 1 (0.1) on steps 1 and 9
+            pat.lanes[1].steps[4] = { true, 0.5f, 0.5f, 1.0f, 1, 0.5f, 12.0f };     // pad 2 (0.2), vel 0.5, +50% late, +12 st
+            pat.lanes[2].steps[12] = { true, 1.0f, 0.5f, 1.0f, 2, 0.0f, 0.0f };     // pad 3 (0.3), ratchet x2
+        });
+
+        CHECK (capture (sq, 200, {})[1500] == 0.0f); // mode Off: silent
+        setParam (sq, ParamIDs::seqMode, 2.0f);       // free running from bar 1
+        auto x = capture (sq, 200, {});
+        const auto at = [&] (int sample) { return std::abs (x[(size_t) sample]); };
+        std::printf ("  seq: %.2f | %.2f %.2f | %.2f | %.2f %.2f %.2f\n", at (1500), at (25000), at (28000), at (49500),
+                     at (72500), at (74500), at (75500));
+        CHECK (std::abs (at (1500) - 0.8f * 0.1f) < 0.005f);    // step 1 (default velocity 0.8)
+        CHECK (at (25000) == 0.0f);                              // step 5 is microtimed 3000 samples late...
+        CHECK (std::abs (at (28000) - 0.5f * 0.2f) < 0.005f);   // ...at velocity 0.5
+        CHECK (std::abs (at (49500) - 0.8f * 0.1f) < 0.005f);   // step 9
+        CHECK (std::abs (at (72500) - 0.3f) < 0.005f && at (74500) == 0.0f && std::abs (at (75500) - 0.3f) < 0.005f); // ratchet x2
+
+        // Step pitch reaches the voice: in one-shot mode a +12 st step plays its 12000-sample slice in 6000 samples.
+        setParam (sq, ParamIDs::seqMode, 0.0f);
+        render (sq, 1);                                 // one block in Off, so Free restarts from bar 1
+        setParam (sq, ParamIDs::playMode, 0.0f);
+        sq.editSeqPattern (4, [] (auto& pat) { pat.lanes[1].steps[0] = { true, 1.0f, 0.5f, 1.0f, 1, 0.0f, 12.0f }; });
+        setParam (sq, ParamIDs::seqPattern, 5.0f);
+        setParam (sq, ParamIDs::seqMode, 2.0f);
+        x = capture (sq, 60, {});                       // 30720 samples: one hit (the next is at 96000)
+        int audible = 0;
+        for (auto v : x) audible += std::abs (v) > 1.0e-6f ? 1 : 0;
+        std::printf ("  step pitch +12 one-shot: %d samples audible\n", audible);
+        CHECK (std::abs (audible - 6000) <= 2);
+        setParam (sq, ParamIDs::playMode, 1.0f);
+
+        // Switching to an empty pattern and to Off both stop cleanly.
+        setParam (sq, ParamIDs::seqPattern, 2.0f);
+        x = capture (sq, 100, {});
+        CHECK (at (50000) == 0.0f && sq.getSeqPlayStep() >= 0);
+        setParam (sq, ParamIDs::seqPattern, 1.0f);
+        setParam (sq, ParamIDs::seqMode, 0.0f);
+        CHECK (render (sq, 4).nonZero == 0 && sq.getSeqPlayStep() == -1);
+
+        // Patterns persist (only non-empty ones are written).
+        sq.editSeqPattern (3, [] (auto& pat) { pat.name = "Fill"; pat.lanes[5].length = 12; pat.lanes[5].steps[11].on = true; });
+        juce::MemoryBlock st;
+        sq.getStateInformation (st);
+        NeuroMPCProcessor restored;
+        restored.setStateInformation (st.getData(), (int) st.getSize());
+        const auto& p0 = restored.getSeqPattern (0);
+        CHECK (p0.lanes[1].steps[4].on && std::abs (p0.lanes[1].steps[4].micro - 0.5f) < 1e-6f && p0.lanes[2].steps[12].ratchet == 2);
+        CHECK (restored.getSeqPattern (3).name == "Fill" && restored.getSeqPattern (3).lanes[5].length == 12 && restored.getSeqPattern (3).lanes[5].steps[11].on);
+        CHECK (restored.getSeqPattern (1).isEmpty());
     }
 
     // Missing file on restore is reported, not substituted.

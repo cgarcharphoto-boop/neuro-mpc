@@ -3,7 +3,7 @@
 An open-source, MPC-style slice sampler for macOS: VST3 (Ableton Live), AU (Logic Pro), and Standalone.
 C++20 · JUCE 9.0.4 (pinned) · CMake. The master spec lives in `../gmni sampler/`.
 
-## Status: Milestones 1–2 + Phases 9–11 (sampler, slicing, time-stretch, pitch analysis, chromatic pitch, pads, arpeggiator + generative)
+## Status: Milestones 1–2 + Phases 9–12 (sampler, slicing, time-stretch, pitch analysis, chromatic pitch, pads, arpeggiator + generative, step sequencer)
 
 | Works and is tested | |
 |---|---|
@@ -17,6 +17,7 @@ C++20 · JUCE 9.0.4 (pinned) · CMake. The master spec lives in `../gmni sampler
 | Pitch & key | YIN pitch per slice and per sample with confidence, a polyphony check, and pitched/uncertain/unpitched status; chroma + Krumhansl–Kessler key that reports uncertainty honestly; per-slice manual Root correction. See [Documentation/PITCH_ANALYSIS.md](Documentation/PITCH_ANALYSIS.md) |
 | Chromatic pitch | Per-slice ±24 st (12-note selector, octave, fine), Resample or Keep-length mode; global transpose, fine tune, pitch bend (range 0–24), pitch LFO (5 shapes, phase, host-tempo sync); Keys mode plays a slice chromatically from its detected or manual root, with scale snapping. See [Documentation/PITCH_SHIFTING.md](Documentation/PITCH_SHIFTING.md) |
 | Arpeggiator | 10 directions, 1/1–1/32 with triplets, gate, octaves, MPC swing, probability, repeats, latch, retrigger, seeded randomness; locked to host PPQ or free-running from the key press; note-offs in samples (no stuck notes on loops). Generative: 16-step rhythm pattern with accents/ratchets and Euclid, inspectable Arpeggio Grammar rules with presets, Phrase Memory with seeded variation, humanise, gesture XY pad. See [Documentation/ARPEGGIATOR.md](Documentation/ARPEGGIATOR.md) |
+| Step sequencer | 16 patterns × 16 lanes, per-lane length (polymeter) and mute, per-step velocity/gate/probability/ratchet/microtiming/pitch, swing, host-transport or free-running; stateless deterministic timing. See [Documentation/SEQUENCER.md](Documentation/SEQUENCER.md) |
 | Real-time safety | No locks, file I/O or allocation on the audio thread. Samples and slices reach the audio thread through `RtShared` (hazard-pointer handoff); UI note input goes through a lock-free FIFO |
 
 **Validation:** `auval` passes. Unit and integration tests pass (`ctest`).

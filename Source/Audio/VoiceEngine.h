@@ -35,8 +35,9 @@ public:
 
     void prepare (double hostSampleRate) noexcept;
     // Routes a note: keyboard mode -> the keyboard slice; pad mode -> every pad on that note (layers), or 36+n without pads.
+    // pitchOffset (semitones) is added on top (e.g. a sequencer step's pitch).
     void noteOn (int note, float velocity, const SampleData&, const SliceSet&, const StretchBank*, const PadMap*,
-                 const VoiceParams&) noexcept;
+                 const VoiceParams&, float pitchOffset = 0.0f) noexcept;
 
     // Starts one slice. noteTag is matched by noteOff (gate mode). Uses the slice's render from the bank when it needs
     // one and it is ready, otherwise the original region.

@@ -50,6 +50,11 @@ NeuroMPCProcessor::NeuroMPCProcessor()
     arpHumanTimeParam  = apvts.getRawParameterValue (ParamIDs::arpHumanTime);
     arpHumanVelParam   = apvts.getRawParameterValue (ParamIDs::arpHumanVel);
     rtArpProgram.publish (std::make_shared<const neuro::ArpProgram> (arpProgram));
+    seqModeParam    = apvts.getRawParameterValue (ParamIDs::seqMode);
+    seqPatternParam = apvts.getRawParameterValue (ParamIDs::seqPattern);
+    seqRateParam    = apvts.getRawParameterValue (ParamIDs::seqRate);
+    seqSwingParam   = apvts.getRawParameterValue (ParamIDs::seqSwing);
+    rtSeq.publish (std::make_shared<const SeqBank> (seqPatterns));
     publishPads();
     startTimerHz (20);
 }
@@ -148,6 +153,14 @@ juce::AudioProcessorValueTreeState::ParameterLayout NeuroMPCProcessor::createLay
                                                AudioParameterFloatAttributes().withLabel ("ms")),
         std::make_unique<AudioParameterFloat> (ParameterID { ParamIDs::arpHumanVel, 1 }, "Arp Humanize Velocity",
                                                NormalisableRange<float> (0.0f, 50.0f, 1.0f), 0.0f,
+                                               AudioParameterFloatAttributes().withLabel ("%")),
+        std::make_unique<AudioParameterChoice> (ParameterID { ParamIDs::seqMode, 1 }, "Sequencer",
+                                                StringArray { "Off", "Host transport", "Free running" }, 0),
+        std::make_unique<AudioParameterInt> (ParameterID { ParamIDs::seqPattern, 1 }, "Sequencer Pattern", 1, numSeqPatterns, 1),
+        std::make_unique<AudioParameterChoice> (ParameterID { ParamIDs::seqRate, 1 }, "Sequencer Rate",
+                                                StringArray { "1/4", "1/8", "1/8T", "1/16", "1/16T", "1/32" }, 3),
+        std::make_unique<AudioParameterFloat> (ParameterID { ParamIDs::seqSwing, 1 }, "Sequencer Swing",
+                                               NormalisableRange<float> (50.0f, 75.0f, 0.5f), 50.0f,
                                                AudioParameterFloatAttributes().withLabel ("%"))
     };
 }
@@ -167,6 +180,9 @@ void NeuroMPCProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     arp = {};
     arpWasOn = arpWasPlaying = false;
     freeBeatOrigin = 0.0;
+    sequencer = {};
+    seqWasRunning = false;
+    seqFreeOrigin = 0.0;
     gainSmoothed.reset (sampleRate, 0.02);
     gainSmoothed.setCurrentAndTargetValue (juce::Decibels::decibelsToGain (gainParam->load()));
 }
@@ -241,7 +257,7 @@ void NeuroMPCProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     auto push = [&] (int offset, Event::Type type, int note, float value, int slice = -1)
     {
         if (numEvents < events.size())
-            events[numEvents++] = { juce::jlimit (0, juce::jmax (0, numSamples - 1), offset), type, note, value, slice };
+            events[numEvents++] = { juce::jlimit (0, juce::jmax (0, numSamples - 1), offset), type, note, value, slice, 0.0f };
     };
 
     auto arpSink = [&] (int offset, int note, float velocity)
@@ -340,6 +356,47 @@ void NeuroMPCProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     arp.endBlock (numSamples);
     arpHeldCount.store (arp.heldCount());
 
+    // ---- Step sequencer: Host = follows the host transport (PPQ); Free = own clock from bar 1 when switched on ----
+    {
+        const auto mode = (int) seqModeParam->load();
+        const auto running = mode == 1 ? hostPpq.has_value() : mode == 2;
+        auto seqSink = [&] (int offset, int note, float velocity, float pitch)
+        {
+            push (offset, velocity > 0.0f ? Event::noteOn : Event::noteOff, note, velocity);
+
+            if (numEvents > 0)
+                events[numEvents - 1].pitch = pitch;
+        };
+
+        if (seqWasRunning && ! running)
+            sequencer.flush (0, seqSink);
+
+        if (running && ! seqWasRunning && mode == 2)
+            seqFreeOrigin = 0.0;
+
+        seqWasRunning = running;
+        seqPlayStep.store (-1);
+
+        if (running)
+        {
+            static constexpr double stepBeats[] { 1.0, 0.5, 1.0 / 3.0, 0.25, 1.0 / 6.0, 0.125 };
+            const auto* bankOfPatterns = rtSeq.acquire();
+            const auto beat = mode == 1 ? *hostPpq : seqFreeOrigin;
+            neuro::SeqTiming timing;
+            timing.stepBeats = stepBeats[juce::jlimit (0, 5, (int) seqRateParam->load())];
+            timing.swing = seqSwingParam->load() / 100.0f;
+            timing.seed = (uint32_t) arpSeedParam->load();
+            const auto& pattern = (*bankOfPatterns)[(size_t) juce::jlimit (0, numSeqPatterns - 1, (int) seqPatternParam->load() - 1)];
+            sequencer.process (pattern, timing, 0, numSamples, beat, beatsPerSample, seqSink);
+            seqPlayStep.store (neuro::Sequencer::stepAt (beat, timing.stepBeats));
+
+            if (mode == 2)
+                seqFreeOrigin += numSamples * beatsPerSample;
+        }
+
+        sequencer.endBlock (numSamples);
+    }
+
     if (! hostPpq)
         freeBeatOrigin += numSamples * beatsPerSample;
 
@@ -356,14 +413,14 @@ void NeuroMPCProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     }
 
     // ---- Render between events ----
-    auto handle = [&] (int note, float velocity, int slice)
+    auto handle = [&] (int note, float velocity, int slice, float pitch)
     {
         if (velocity <= 0.0f)
             engine.noteOff (note);
         else if (s != nullptr && sl != nullptr && slice >= 0)
             engine.playSlice (slice, note, velocity, 0.0f, 0, *s, *sl, bank, vp);
         else if (s != nullptr && sl != nullptr)
-            engine.noteOn (note, velocity, *s, *sl, bank, padMap, vp);
+            engine.noteOn (note, velocity, *s, *sl, bank, padMap, vp, pitch);
     };
 
     int pos = 0;
@@ -383,7 +440,7 @@ void NeuroMPCProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
         }
         else
         {
-            handle (e.note, e.type == Event::noteOn ? e.value : 0.0f, e.slice);
+            handle (e.note, e.type == Event::noteOn ? e.value : 0.0f, e.slice, e.pitch);
         }
     }
 
@@ -580,10 +637,21 @@ void NeuroMPCProcessor::stopAudition (int tag)
     pushUiNote (tag, 0.0f, -1);
 }
 
+void NeuroMPCProcessor::editSeqPattern (int index, const std::function<void (neuro::SeqPattern&)>& edit)
+{
+    edit (seqPatterns[(size_t) juce::jlimit (0, numSeqPatterns - 1, index)]);
+    rtSeq.publish (std::make_shared<const SeqBank> (seqPatterns));
+}
+
 void NeuroMPCProcessor::editArpProgram (const std::function<void (neuro::ArpProgram&)>& edit)
 {
     edit (arpProgram);
     rtArpProgram.publish (std::make_shared<const neuro::ArpProgram> (arpProgram));
+    seqModeParam    = apvts.getRawParameterValue (ParamIDs::seqMode);
+    seqPatternParam = apvts.getRawParameterValue (ParamIDs::seqPattern);
+    seqRateParam    = apvts.getRawParameterValue (ParamIDs::seqRate);
+    seqSwingParam   = apvts.getRawParameterValue (ParamIDs::seqSwing);
+    rtSeq.publish (std::make_shared<const SeqBank> (seqPatterns));
 }
 
 void NeuroMPCProcessor::editPads (const std::function<void (neuro::PadBank&)>& edit)
@@ -847,6 +915,57 @@ void NeuroMPCProcessor::getStateInformation (juce::MemoryBlock& dest)
 
     root.appendChild (programTree, nullptr);
 
+    // Sequencer: only non-empty patterns, and only steps that are on.
+    juce::ValueTree seqTree ("SEQUENCER");
+
+    for (int pi = 0; pi < numSeqPatterns; ++pi)
+    {
+        const auto& pat = seqPatterns[(size_t) pi];
+
+        if (pat.isEmpty() && pat.name.empty())
+            continue;
+
+        juce::ValueTree pt ("PATTERN");
+        pt.setProperty ("index", pi, nullptr);
+        pt.setProperty ("name", juce::String (pat.name), nullptr);
+        pt.setProperty ("lanes", pat.numLanes, nullptr);
+
+        for (int li = 0; li < neuro::SeqPattern::maxLanes; ++li)
+        {
+            const auto& lane = pat.lanes[(size_t) li];
+            juce::ValueTree lt ("LANE");
+            lt.setProperty ("index", li, nullptr);
+            lt.setProperty ("note", lane.note, nullptr);
+            lt.setProperty ("length", lane.length, nullptr);
+            lt.setProperty ("mute", lane.mute, nullptr);
+            lt.setProperty ("name", juce::String (lane.name), nullptr);
+
+            for (int si = 0; si < neuro::SeqLane::maxSteps; ++si)
+            {
+                const auto& st = lane.steps[(size_t) si];
+
+                if (! st.on)
+                    continue;
+
+                juce::ValueTree t ("STEP");
+                t.setProperty ("i", si, nullptr);
+                t.setProperty ("vel", st.velocity, nullptr);
+                t.setProperty ("gate", st.gate, nullptr);
+                t.setProperty ("prob", st.probability, nullptr);
+                t.setProperty ("ratchet", st.ratchet, nullptr);
+                t.setProperty ("micro", st.micro, nullptr);
+                t.setProperty ("pitch", st.pitch, nullptr);
+                lt.appendChild (t, nullptr);
+            }
+
+            pt.appendChild (lt, nullptr);
+        }
+
+        seqTree.appendChild (pt, nullptr);
+    }
+
+    root.appendChild (seqTree, nullptr);
+
     if (auto xml = root.createXml())
         copyXmlToBinary (*xml, dest);
 }
@@ -864,6 +983,41 @@ void NeuroMPCProcessor::setStateInformation (const void* data, int size)
         apvts.replaceState (params);
 
     keyboardSlice = root.getProperty ("keyboardSlice", 0);
+
+    if (auto seqTree = root.getChildWithName ("SEQUENCER"); seqTree.isValid())
+    {
+        seqPatterns = {};
+
+        for (const auto& pt : seqTree)
+        {
+            auto& pat = seqPatterns[(size_t) juce::jlimit (0, numSeqPatterns - 1, (int) pt.getProperty ("index", 0))];
+            pat.name = pt.getProperty ("name", "").toString().toStdString();
+            pat.numLanes = juce::jlimit (1, neuro::SeqPattern::maxLanes, (int) pt.getProperty ("lanes", 8));
+
+            for (const auto& lt : pt)
+            {
+                auto& lane = pat.lanes[(size_t) juce::jlimit (0, neuro::SeqPattern::maxLanes - 1, (int) lt.getProperty ("index", 0))];
+                lane.note = juce::jlimit (0, 127, (int) lt.getProperty ("note", 36));
+                lane.length = juce::jlimit (1, neuro::SeqLane::maxSteps, (int) lt.getProperty ("length", 16));
+                lane.mute = lt.getProperty ("mute", false);
+                lane.name = lt.getProperty ("name", "").toString().toStdString();
+
+                for (const auto& t : lt)
+                {
+                    auto& st = lane.steps[(size_t) juce::jlimit (0, neuro::SeqLane::maxSteps - 1, (int) t.getProperty ("i", 0))];
+                    st.on = true;
+                    st.velocity = juce::jlimit (0.0f, 1.0f, (float) t.getProperty ("vel", 0.8f));
+                    st.gate = juce::jlimit (0.05f, 1.0f, (float) t.getProperty ("gate", 0.5f));
+                    st.probability = juce::jlimit (0.0f, 1.0f, (float) t.getProperty ("prob", 1.0f));
+                    st.ratchet = juce::jlimit (1, 4, (int) t.getProperty ("ratchet", 1));
+                    st.micro = juce::jlimit (-0.5f, 0.5f, (float) t.getProperty ("micro", 0.0f));
+                    st.pitch = juce::jlimit (-24.0f, 24.0f, (float) t.getProperty ("pitch", 0.0f));
+                }
+            }
+        }
+
+        rtSeq.publish (std::make_shared<const SeqBank> (seqPatterns));
+    }
 
     if (auto programTree = root.getChildWithName ("ARP_PROGRAM"); programTree.isValid())
     {
