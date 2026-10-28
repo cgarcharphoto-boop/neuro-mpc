@@ -40,6 +40,16 @@ NeuroMPCProcessor::NeuroMPCProcessor()
     arpVelocityParam  = apvts.getRawParameterValue (ParamIDs::arpVelocity);
     arpRetriggerParam = apvts.getRawParameterValue (ParamIDs::arpRetrigger);
     arpSeedParam      = apvts.getRawParameterValue (ParamIDs::arpSeed);
+    arpAccentParam     = apvts.getRawParameterValue (ParamIDs::arpAccent);
+    arpPhraseParam     = apvts.getRawParameterValue (ParamIDs::arpPhrase);
+    arpVariationParam  = apvts.getRawParameterValue (ParamIDs::arpVariation);
+    arpVaryPitchParam  = apvts.getRawParameterValue (ParamIDs::arpVaryPitch);
+    arpVaryVelParam    = apvts.getRawParameterValue (ParamIDs::arpVaryVel);
+    arpVaryRhythmParam = apvts.getRawParameterValue (ParamIDs::arpVaryRhythm);
+    arpReturnParam     = apvts.getRawParameterValue (ParamIDs::arpReturn);
+    arpHumanTimeParam  = apvts.getRawParameterValue (ParamIDs::arpHumanTime);
+    arpHumanVelParam   = apvts.getRawParameterValue (ParamIDs::arpHumanVel);
+    rtArpProgram.publish (std::make_shared<const neuro::ArpProgram> (arpProgram));
     publishPads();
     startTimerHz (20);
 }
@@ -117,7 +127,28 @@ juce::AudioProcessorValueTreeState::ParameterLayout NeuroMPCProcessor::createLay
                                                  [] (int v, int) { return v == 0 ? String ("as played") : String (v); })),
         std::make_unique<AudioParameterChoice> (ParameterID { ParamIDs::arpRetrigger, 1 }, "Arp Retrigger",
                                                 StringArray { "Off", "First note", "Every note" }, 1),
-        std::make_unique<AudioParameterInt> (ParameterID { ParamIDs::arpSeed, 1 }, "Arp Seed", 1, 9999, 1)
+        std::make_unique<AudioParameterInt> (ParameterID { ParamIDs::arpSeed, 1 }, "Arp Seed", 1, 9999, 1),
+        std::make_unique<AudioParameterFloat> (ParameterID { ParamIDs::arpAccent, 1 }, "Arp Accent",
+                                               NormalisableRange<float> (0.0f, 100.0f, 1.0f), 30.0f,
+                                               AudioParameterFloatAttributes().withLabel ("%")),
+        std::make_unique<AudioParameterInt> (ParameterID { ParamIDs::arpPhrase, 1 }, "Arp Phrase Length", 0, 64, 0,
+                                             AudioParameterIntAttributes().withStringFromValueFunction (
+                                                 [] (int v, int) { return v == 0 ? String ("off") : String (v); })),
+        std::make_unique<AudioParameterFloat> (ParameterID { ParamIDs::arpVariation, 1 }, "Arp Variation",
+                                               NormalisableRange<float> (0.0f, 100.0f, 1.0f), 0.0f,
+                                               AudioParameterFloatAttributes().withLabel ("%")),
+        std::make_unique<AudioParameterBool> (ParameterID { ParamIDs::arpVaryPitch, 1 }, "Arp Vary Pitch", true),
+        std::make_unique<AudioParameterBool> (ParameterID { ParamIDs::arpVaryVel, 1 }, "Arp Vary Velocity", true),
+        std::make_unique<AudioParameterBool> (ParameterID { ParamIDs::arpVaryRhythm, 1 }, "Arp Vary Rhythm", false),
+        std::make_unique<AudioParameterInt> (ParameterID { ParamIDs::arpReturn, 1 }, "Arp Return Every", 0, 16, 0,
+                                             AudioParameterIntAttributes().withStringFromValueFunction (
+                                                 [] (int v, int) { return v == 0 ? String ("never") : String (v); })),
+        std::make_unique<AudioParameterFloat> (ParameterID { ParamIDs::arpHumanTime, 1 }, "Arp Humanize Time",
+                                               NormalisableRange<float> (0.0f, 30.0f, 0.1f), 0.0f,
+                                               AudioParameterFloatAttributes().withLabel ("ms")),
+        std::make_unique<AudioParameterFloat> (ParameterID { ParamIDs::arpHumanVel, 1 }, "Arp Humanize Velocity",
+                                               NormalisableRange<float> (0.0f, 50.0f, 1.0f), 0.0f,
+                                               AudioParameterFloatAttributes().withLabel ("%"))
     };
 }
 
@@ -222,7 +253,8 @@ void NeuroMPCProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     };
 
     const auto arpOn = arpOnParam->load() > 0.5f;
-    updateArpSettings();
+    arp.setProgram (rtArpProgram.acquire());
+    updateArpSettings (bpm);
 
     if (arpWasOn && ! arpOn)
         arp.flush (0, arpSink, true);          // switching off: release everything the arp started
@@ -397,7 +429,7 @@ void NeuroMPCProcessor::renderWithModulation (juce::AudioBuffer<float>& buffer, 
     }
 }
 
-void NeuroMPCProcessor::updateArpSettings()
+void NeuroMPCProcessor::updateArpSettings (double bpm)
 {
     static constexpr double stepBeats[] { 4.0, 2.0, 1.0, 2.0 / 3.0, 0.5, 1.0 / 3.0, 0.25, 1.0 / 6.0, 0.125 };
     auto a = arp.getSettings();
@@ -411,6 +443,17 @@ void NeuroMPCProcessor::updateArpSettings()
     a.fixedVelocity = (int) arpVelocityParam->load();
     a.retrigger = (neuro::ArpRetrigger) juce::jlimit (0, 2, (int) arpRetriggerParam->load());
     a.seed = (uint32_t) arpSeedParam->load();
+    a.accentAmount = arpAccentParam->load() / 100.0f;
+    a.phraseLength = (int) arpPhraseParam->load();
+    a.variation = arpVariationParam->load() / 100.0f;
+    a.varyPitch = arpVaryPitchParam->load() > 0.5f;
+    a.varyVelocity = arpVaryVelParam->load() > 0.5f;
+    a.varyRhythm = arpVaryRhythmParam->load() > 0.5f;
+    a.returnEvery = (int) arpReturnParam->load();
+    a.humanizeBeats = arpHumanTimeParam->load() / 1000.0 * bpm / 60.0;
+    a.humanizeVelocity = arpHumanVelParam->load() / 100.0f;
+    a.scaleMask = neuro::scales[(size_t) juce::jlimit (0, (int) neuro::scales.size() - 1, (int) scaleParam->load())].mask;
+    a.scaleRoot = (int) scaleRootParam->load();
     arp.setSettings (a);                        // keeps the current latch state...
     arp.setLatch (arpLatchParam->load() > 0.5f); // ...so un-latching can release latched notes
 }
@@ -535,6 +578,12 @@ int NeuroMPCProcessor::startSliceAudition (int sliceIndex, float velocity)
 void NeuroMPCProcessor::stopAudition (int tag)
 {
     pushUiNote (tag, 0.0f, -1);
+}
+
+void NeuroMPCProcessor::editArpProgram (const std::function<void (neuro::ArpProgram&)>& edit)
+{
+    edit (arpProgram);
+    rtArpProgram.publish (std::make_shared<const neuro::ArpProgram> (arpProgram));
 }
 
 void NeuroMPCProcessor::editPads (const std::function<void (neuro::PadBank&)>& edit)
@@ -771,6 +820,33 @@ void NeuroMPCProcessor::getStateInformation (juce::MemoryBlock& dest)
 
     root.appendChild (padTree, nullptr);
 
+    juce::ValueTree programTree ("ARP_PROGRAM");
+    programTree.setProperty ("length", arpProgram.length, nullptr);
+
+    for (const auto& step : arpProgram.steps)
+    {
+        juce::ValueTree t ("STEP");
+        t.setProperty ("on", step.on, nullptr);
+        t.setProperty ("accent", step.accent, nullptr);
+        t.setProperty ("ratchet", step.ratchet, nullptr);
+        programTree.appendChild (t, nullptr);
+    }
+
+    for (int i = 0; i < arpProgram.numRules; ++i)
+    {
+        const auto& r = arpProgram.rules[(size_t) i];
+        juce::ValueTree t ("RULE");
+        t.setProperty ("when", (int) r.when, nullptr);
+        t.setProperty ("n", r.n, nullptr);
+        t.setProperty ("offset", r.offset, nullptr);
+        t.setProperty ("action", (int) r.action, nullptr);
+        t.setProperty ("amount", r.amount, nullptr);
+        t.setProperty ("enabled", r.enabled, nullptr);
+        programTree.appendChild (t, nullptr);
+    }
+
+    root.appendChild (programTree, nullptr);
+
     if (auto xml = root.createXml())
         copyXmlToBinary (*xml, dest);
 }
@@ -788,6 +864,28 @@ void NeuroMPCProcessor::setStateInformation (const void* data, int size)
         apvts.replaceState (params);
 
     keyboardSlice = root.getProperty ("keyboardSlice", 0);
+
+    if (auto programTree = root.getChildWithName ("ARP_PROGRAM"); programTree.isValid())
+    {
+        neuro::ArpProgram program;
+        program.length = juce::jlimit (1, neuro::ArpProgram::maxSteps, (int) programTree.getProperty ("length", 16));
+        int step = 0;
+
+        for (const auto& t : programTree)
+        {
+            if (t.hasType ("STEP") && step < neuro::ArpProgram::maxSteps)
+                program.steps[(size_t) step++] = { (bool) t.getProperty ("on", true), (bool) t.getProperty ("accent", false),
+                                                   juce::jlimit (1, 4, (int) t.getProperty ("ratchet", 1)) };
+
+            if (t.hasType ("RULE"))
+                program.addRule ({ (neuro::ArpRule::When) juce::jlimit (0, 3, (int) t.getProperty ("when", 0)),
+                                   juce::jlimit (1, 100, (int) t.getProperty ("n", 4)), juce::jmax (0, (int) t.getProperty ("offset", 0)),
+                                   (neuro::ArpRule::Action) juce::jlimit (0, 4, (int) t.getProperty ("action", 0)),
+                                   juce::jlimit (-24, 24, (int) t.getProperty ("amount", 12)), (bool) t.getProperty ("enabled", true) });
+        }
+
+        editArpProgram ([&] (auto& p) { p = program; });
+    }
 
     // Pads are restored before slices are published, so followSlices sees the saved choice.
     if (auto padTree = root.getChildWithName ("PADS"); padTree.isValid())

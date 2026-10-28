@@ -330,10 +330,12 @@ namespace
     // Runs the arp in free time at 120 BPM / 48 kHz (1 beat = 24000 samples). keys: (sample, note, velocity; 0 = off).
     // beatJump: if > 0, the beat position wraps every `beatJump` beats (a host loop).
     std::vector<ArpEvent> runArp (const ArpSettings& settings, std::vector<std::tuple<int64_t, int, float>> keys,
-                                  int64_t totalSamples, int blockSize = 512, double beatJump = 0.0)
+                                  int64_t totalSamples, int blockSize = 512, double beatJump = 0.0,
+                                  const ArpProgram* program = nullptr)
     {
         Arpeggiator arp;
         arp.setSettings (settings);
+        arp.setProgram (program);
         std::vector<ArpEvent> events;
         const double bps = 2.0 / 48000.0;
         size_t nextKey = 0;
@@ -503,6 +505,154 @@ static void arpTests()
     }
 }
 
+static void arpGenerativeTests()
+{
+    const std::vector<std::tuple<int64_t, int, float>> ceg { { 0, 60, 0.5f }, { 0, 64, 0.5f }, { 0, 67, 0.5f } };
+    auto ons = [] (const std::vector<ArpEvent>& ev)
+    {
+        std::vector<std::pair<int64_t, int>> v;
+        for (auto& e : ev) if (e.velocity > 0.0f) v.emplace_back (e.sample, e.note);
+        return v;
+    };
+
+    // Pattern rests skip time but not notes: x . x x -> 60 @0, 64 @12000, 67 @18000, 60 @24000.
+    {
+        ArpProgram prog;
+        prog.length = 4;
+        prog.steps[1].on = false;
+        auto v = ons (runArp ({}, ceg, 30000, 512, 0.0, &prog));
+        CHECK ((v.size() >= 4 && v[0] == std::pair<int64_t, int> { 0, 60 } && v[1] == std::pair<int64_t, int> { 12000, 64 }
+                && v[2] == std::pair<int64_t, int> { 18000, 67 } && v[3] == std::pair<int64_t, int> { 24000, 60 }));
+    }
+
+    // Accent boosts velocity; ratchet x3 = three hits per step with a third of the gate each.
+    {
+        ArpProgram prog;
+        prog.length = 2;
+        prog.steps[0].accent = true;
+        prog.steps[1].ratchet = 3;
+        ArpSettings s;
+        s.accentAmount = 0.5f;
+        auto ev = runArp (s, ceg, 11000, 512, 0.0, &prog); // whole blocks: stay clear of the 12000 step
+        std::vector<ArpEvent> on;
+        for (auto& e : ev) if (e.velocity > 0.0f) on.push_back (e);
+        CHECK (on.size() == 4 && std::abs (on[0].velocity - 0.75f) < 1e-5f && std::abs (on[1].velocity - 0.5f) < 1e-5f);
+        CHECK (on[1].sample == 6000 && on[2].sample == 8000 && on[3].sample == 10000 && on[1].note == on[3].note);
+        CHECK (ev.size() > 2 && ev[2].sample == 6000 && ev[3].sample == 7000); // ratchet gate: 6000 x 0.5 / 3
+    }
+
+    // Euclid (3, 8) = x..x..x.
+    {
+        ArpProgram prog;
+        prog.euclid (3, 8, 0);
+        std::string p;
+        for (int i = 0; i < prog.length; ++i) p += prog.steps[(size_t) i].on ? 'x' : '.';
+        CHECK (p == "x..x..x." && prog.length == 8);
+        prog.euclid (5, 8, 1);
+        int pulses = 0;
+        for (int i = 0; i < 8; ++i) pulses += prog.steps[(size_t) i].on ? 1 : 0;
+        CHECK (pulses == 5);
+    }
+
+    // Grammar: octave jump on the 2nd of every 2 steps; passing tone in C major; phrase-end ratchet; chance rest.
+    {
+        ArpProgram prog;
+        prog.addRule ({ ArpRule::When::every, 2, 1, ArpRule::Action::transpose, 12, true });
+        auto notes = onNotes (runArp ({}, ceg, 40000, 512, 0.0, &prog), 6);
+        CHECK ((notes == std::vector<int> { 60, 76, 67, 72, 64, 79 }));
+        CHECK (describe (prog.rules[0]) == "On step 2 of every 2: transpose +12 st");
+
+        ArpProgram passing;
+        passing.addRule ({ ArpRule::When::range, 4, 2, ArpRule::Action::passing, 1, true });
+        ArpSettings major;
+        major.scaleMask = scales[1].mask;
+        notes = onNotes (runArp (major, ceg, 40000, 512, 0.0, &passing), 4);
+        CHECK ((notes == std::vector<int> { 60, 64, 69, 62 })); // G->A, C->D on steps 3-4
+
+        ArpProgram ending;
+        ending.length = 4;
+        ending.addRule ({ ArpRule::When::phraseEnd, 1, 0, ArpRule::Action::ratchet, 2, true });
+        CHECK (onNotes (runArp ({}, ceg, 23000, 512, 0.0, &ending)).size() == 5); // 4 steps, the last doubled
+
+        ArpProgram chance;
+        chance.addRule ({ ArpRule::When::chance, 50, 0, ArpRule::Action::rest, 0, true });
+        const auto a = onNotes (runArp ({}, ceg, 6000 * 200, 512, 0.0, &chance), 1000);
+        CHECK (a.size() > 70 && a.size() < 130 && a == onNotes (runArp ({}, ceg, 6000 * 200, 512, 0.0, &chance), 1000));
+
+        prog.rules[0].enabled = false;
+        CHECK ((onNotes (runArp ({}, ceg, 20000, 512, 0.0, &prog), 3) == std::vector<int> { 60, 64, 67 }));
+    }
+
+    // Phrase Memory: a random phrase repeats exactly; variation changes pitches but keeps the rhythm; returnEvery restores.
+    {
+        ArpSettings s;
+        s.direction = ArpDirection::random;
+        s.octaves = 2;
+        s.phraseLength = 8;
+        ArpProgram prog;
+        prog.euclid (5, 8, 0);
+        const auto exact = ons (runArp (s, ceg, 6000 * 8 * 4, 512, 0.0, &prog));
+        CHECK (exact.size() == 20);
+        bool repeats = true;
+        for (size_t i = 5; i < exact.size(); ++i)
+            repeats = repeats && exact[i].second == exact[i - 5].second && exact[i].first - exact[i - 5].first == 48000;
+        CHECK (repeats);
+
+        s.variation = 1.0f;
+        s.varyPitch = true;
+        s.varyVelocity = false;
+        s.returnEvery = 2;
+        const auto varied = ons (runArp (s, ceg, 6000 * 8 * 4, 512, 0.0, &prog));
+        CHECK (varied.size() == 20);
+        bool sameRhythm = true, pitchChanged = false, cycle2Original = true;
+        for (size_t i = 0; i < 20; ++i)
+        {
+            sameRhythm = sameRhythm && varied[i].first == exact[i].first;
+            if (i >= 5 && i < 10) pitchChanged = pitchChanged || varied[i].second != exact[i].second;
+            if (i >= 10 && i < 15) cycle2Original = cycle2Original && varied[i].second == exact[i - 10].second;
+        }
+        CHECK (sameRhythm && pitchChanged && cycle2Original);
+
+        s.varyPitch = false;
+        s.varyRhythm = true;
+        s.returnEvery = 0;
+        CHECK (ons (runArp (s, ceg, 6000 * 8 * 4, 512, 0.0, &prog)) != exact); // rhythm variation changes timing
+    }
+
+    // Humanise: every step is late by at most the amount, deterministic; everything stays balanced and block-size-proof.
+    {
+        ArpSettings s;
+        s.humanizeBeats = 0.05; // 1200 samples
+        s.humanizeVelocity = 0.2f;
+        const auto a = ons (runArp (s, ceg, 60000));
+        bool bounded = true, moved = false;
+        for (size_t i = 0; i < a.size(); ++i)
+        {
+            const auto late = a[i].first - (int64_t) i * 6000;
+            bounded = bounded && late >= 0 && late <= 1200;
+            moved = moved || late > 0;
+        }
+        CHECK (bounded && moved && a == ons (runArp (s, ceg, 60000)));
+
+        ArpProgram prog;
+        prog.euclid (5, 7, 2);
+        prog.steps[3].ratchet = 4;
+        prog.addRule ({ ArpRule::When::every, 3, 0, ArpRule::Action::transpose, 7, true });
+        s.phraseLength = 12;
+        s.variation = 0.5f;
+        s.varyRhythm = true;
+        std::vector<std::tuple<int64_t, int, float>> keys { { 0, 60, 0.8f }, { 0, 64, 0.8f }, { 0, 67, 0.8f },
+                                                            { 200000, 60, 0.0f }, { 200000, 64, 0.0f }, { 200000, 67, 0.0f } };
+        auto small = runArp (s, keys, 260000, 61, 0.0, &prog), large = runArp (s, keys, 260000, 2048, 0.0, &prog);
+        auto looped = runArp (s, keys, 260000, 512, 2.0, &prog);
+        CHECK (balanced (small) && balanced (large) && balanced (looped) && small.size() == large.size());
+        bool same = small.size() == large.size();
+        for (size_t i = 0; same && i < small.size(); ++i)
+            same = small[i].sample == large[i].sample && small[i].note == large[i].note;
+        CHECK (same);
+    }
+}
+
 static void keyTests()
 {
     auto print = [] (const char* name, const KeyEstimate& k)
@@ -550,6 +700,7 @@ int main()
     scaleTests();
     padTests();
     arpTests();
+    arpGenerativeTests();
     keyTests();
     std::printf (failures == 0 ? "All core tests passed\n" : "%d failure(s)\n", failures);
     return failures == 0 ? EXIT_SUCCESS : EXIT_FAILURE;

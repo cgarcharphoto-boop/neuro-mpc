@@ -35,5 +35,64 @@
 
 `neuro_engine_tests`, end to end: held pads play pad 1 → 2 → 3 → 1 at the expected sample positions and levels, with silence after each gate. Switching off leaves nothing sounding, and the settings persist.
 
-## Not yet (Phase 11)
-Arpeggio Grammar, Phrase Memory, controlled variation/mutation, Gesture-to-Arpeggio, ratchets, humanisation, accents and rests, and MIDI output of generated notes.
+# Advanced arpeggiation (Phase 11)
+
+Each grid step is **decided once**, cached by grid index, in this order: rhythm pattern → Phrase Memory → Grammar rules → notes. Ratchets and humanised timing therefore stay consistent across block boundaries and host loops. Every result is deterministic for a given seed.
+
+## Rhythm pattern (GEN tab, saved with the project)
+- **Steps:** up to 16, each with **on/rest**, **accent** (velocity × (1 + Accent %)) and a **ratchet** of ×1–4 (evenly spaced hits within the step, gate divided between them).
+- **Rests:** a pattern rest skips time but *not* a note, so the note order continues after it. A probability skip or a rule rest uses up its note.
+- **Euclid:** spreads `pulses` evenly over the pattern length, then rotates (3 over 8 = `x..x..x.`).
+
+## Arpeggio Grammar (inspectable, editable rules; up to 8, applied in order)
+- **When:**
+  - step N of every M;
+  - steps from N of every M;
+  - the last N steps of the phrase;
+  - N% chance (seeded).
+- **Do:**
+  - transpose ± semitones;
+  - rest;
+  - accent;
+  - ratchet ×N;
+  - **passing tone** ± scale degrees, using the Keys-mode scale (chromatic = semitones).
+- **Display:** each rule is listed in plain language, e.g. "On step 2 of every 2: transpose +12 st".
+- **Presets** load ordinary rules you can then edit: Octave climb, Passing tones, Phrase-end fill, Accents 3-3-2, Stutter & drop, Call & answer.
+
+## Phrase Memory
+- **Recording:** with Phrase length N > 0, the first N steps (note choice, rests, accents, ratchets) are recorded.
+- **Replay:** later cycles replay the recording. Each step's **pitch / velocity / rhythm** varies with probability *Variation*, chosen per attribute and seeded per cycle, so a variation is reproducible.
+- **Return every C** replays the original exactly on every Cth cycle. Pitch is stored as a pattern index, so a recorded motif follows a new chord.
+- **What this allows:**
+  - repeat exact pitches while varying only velocity;
+  - keep the rhythm while changing note order;
+  - keep a motif and vary its ending (combine with a phrase-end rule);
+  - alternate between the original and a variation (Return every 2).
+
+## Humanise
+- **Timing:** each step is delayed by 0…*ms* (deterministic per step). Steps are only ever delayed, never moved earlier.
+- **Velocity:** ±%.
+
+## Gesture-to-Arpeggio (ARP tab, optional)
+The XY pad sets host parameters, so gestures can be automated and recorded:
+- X → density (Chance 25–100%);
+- Y → octave range (1–4);
+- drag speed → Variation (it decays when the drag is slow).
+
+The arpeggiator works the same without the pad.
+
+## Tests
+`neuro_core_tests` `arpGenerativeTests`:
+- **Pattern and ratchets:** rest timing without skipping a note, accent velocity, ratchet times and gate, Euclid patterns.
+- **Grammar:** each rule type (octave jump, scale passing tone, phrase-end ratchet, seeded chance), plus rule text and disabling a rule.
+- **Phrase Memory:** an exact repeat of a random phrase; pitch-only variation keeping the rhythm; Return every 2 restoring the original; rhythm variation changing timing.
+- **Humanise:** bounded and deterministic.
+- **With every feature on at once:** balanced on/off, a 2-beat host loop, and identical output at block sizes 61 and 2048.
+
+`neuro_engine_tests`, through the audio output: the ratchet hits, a pattern rest and a grammar transpose (+1 → the next pad) are all audible at the expected samples. The program persists.
+
+## Not yet
+- MIDI output of generated notes;
+- per-voice humanised pitch;
+- user-saved grammar presets;
+- a dedicated Pattern-defined direction (patterns currently shape rhythm, not order).

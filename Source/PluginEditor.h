@@ -1,6 +1,7 @@
 #pragma once
 
 #include "PluginProcessor.h"
+#include "UI/GesturePad.h"
 #include "UI/WaveformView.h"
 
 class NeuroMPCEditor : public juce::AudioProcessorEditor,
@@ -42,10 +43,12 @@ private:
     void setSelectedPitch (float semitones);
     float selectedRoot() const; // reference for the 12-note selector
     void selectPad (int padIndex);
-    enum class Panel { slice, pad, arp };
+    enum class Panel { slice, pad, arp, gen };
     void showPanel (Panel);
     void updateArpPanel();
+    void updateGenPanel();
     std::vector<juce::Component*> arpPanelComponents();
+    std::vector<juce::Component*> genPanelComponents();
     void updatePadPanel();
     void editSelectedPad (const std::function<void (neuro::PadDefinition&)>&);
     std::vector<juce::Component*> slicePanelComponents();
@@ -84,7 +87,7 @@ private:
     std::vector<std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment>> comboAttachments;
     std::vector<std::unique_ptr<Pad>> pads;
     std::array<juce::TextButton, neuro::numBanks> bankButtons;
-    juce::TextButton sliceTab { "SLICE" }, padTab { "PAD" }, arpTab { "ARP" };
+    juce::TextButton sliceTab { "SLICE" }, padTab { "PAD" }, arpTab { "ARP" }, genTab { "GEN" };
     int currentBank = 0, selectedPad = 0, copiedPad = -1, learnBaseline = -1, shownSliceCount = -1;
     Panel activePanel = Panel::slice;
 
@@ -100,6 +103,27 @@ private:
                  arpVelocity { juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight },
                  arpSeed { juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight };
     std::vector<std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment>> buttonAttachments;
+    GesturePad gesturePad { proc.apvts, ParamIDs::arpChance, ParamIDs::arpOctaves, ParamIDs::arpVariation };
+
+    // Generative panel: rhythm pattern, Euclid, Phrase Memory, humanise, Arpeggio Grammar
+    juce::Label genTitle, rulesList;
+    std::array<juce::TextButton, neuro::ArpProgram::maxSteps> stepButtons;
+    juce::Slider patternLength { juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight },
+                 euclidPulses { juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight },
+                 euclidRotate { juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight },
+                 arpPhrase { juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight },
+                 arpVariation { juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight },
+                 arpReturn { juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight },
+                 arpAccent { juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight },
+                 arpHumanTime { juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight },
+                 arpHumanVel { juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight },
+                 ruleN { juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight },
+                 ruleOffset { juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight },
+                 ruleAmount { juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight };
+    juce::ToggleButton varyPitch { "Pitch" }, varyVelocity { "Velocity" }, varyRhythm { "Rhythm" };
+    juce::TextButton euclidButton { "Euclid" }, allOnButton { "All on" }, addRule { "Add" }, removeRule { "Remove last" },
+                     clearRules { "Clear rules" };
+    juce::ComboBox ruleWhen, ruleAction, grammarPresets;
 
     // Selected-pad panel
     juce::Label padTitle, padName;

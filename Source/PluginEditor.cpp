@@ -166,7 +166,7 @@ NeuroMPCEditor::NeuroMPCEditor (NeuroMPCProcessor& p) : AudioProcessorEditor (p)
 
     bankButtons[0].setToggleState (true, juce::dontSendNotification);
 
-    for (auto* tab : { &sliceTab, &padTab, &arpTab })
+    for (auto* tab : { &sliceTab, &padTab, &arpTab, &genTab })
     {
         tab->setRadioGroupId (2);
         tab->setClickingTogglesState (true);
@@ -177,7 +177,123 @@ NeuroMPCEditor::NeuroMPCEditor (NeuroMPCProcessor& p) : AudioProcessorEditor (p)
     sliceTab.onClick = [this] { showPanel (Panel::slice); };
     padTab.onClick   = [this] { showPanel (Panel::pad); };
     arpTab.onClick   = [this] { showPanel (Panel::arp); };
-    waveform.onSliceClicked = [this] { if (activePanel != Panel::arp) showPanel (Panel::slice); };
+    genTab.onClick   = [this] { showPanel (Panel::gen); };
+    waveform.onSliceClicked = [this] { if (activePanel == Panel::slice || activePanel == Panel::pad) showPanel (Panel::slice); };
+
+    // ---- Generative panel ----
+    for (auto* c : genPanelComponents())
+        addAndMakeVisible (c);
+
+    genTitle.setText ("PATTERN", juce::dontSendNotification);
+    genTitle.setFont (juce::FontOptions (14.0f, juce::Font::bold));
+    rulesList.setJustificationType (juce::Justification::topLeft);
+    rulesList.setColour (juce::Label::backgroundColourId, panel);
+
+    for (int i = 0; i < neuro::ArpProgram::maxSteps; ++i)
+    {
+        auto& b = stepButtons[(size_t) i];
+        b.setTooltip ("Click: on/rest. Shift-click: accent. Alt-click: ratchet x1-x4");
+        b.onClick = [this, i]
+        {
+            const auto mods = juce::ModifierKeys::getCurrentModifiers();
+            proc.editArpProgram ([&] (auto& prog)
+            {
+                auto& step = prog.steps[(size_t) i];
+
+                if (mods.isShiftDown())     step.accent = ! step.accent;
+                else if (mods.isAltDown())  step.ratchet = step.ratchet % 4 + 1;
+                else                        step.on = ! step.on;
+            });
+            updateGenPanel();
+        };
+    }
+
+    patternLength.setRange (1, neuro::ArpProgram::maxSteps, 1);
+    patternLength.onValueChange = [this] { proc.editArpProgram ([v = (int) patternLength.getValue()] (auto& prog) { prog.length = v; }); };
+    euclidPulses.setRange (0, neuro::ArpProgram::maxSteps, 1);
+    euclidPulses.setValue (5, juce::dontSendNotification);
+    euclidRotate.setRange (0, neuro::ArpProgram::maxSteps - 1, 1);
+    euclidButton.setTooltip ("Spread the pulses evenly over the pattern length (Euclidean rhythm)");
+    euclidButton.onClick = [this]
+    {
+        proc.editArpProgram ([this] (auto& prog) { prog.euclid ((int) euclidPulses.getValue(), prog.length, (int) euclidRotate.getValue()); });
+        updateGenPanel();
+    };
+    allOnButton.onClick = [this]
+    {
+        proc.editArpProgram ([] (auto& prog) { for (auto& st : prog.steps) st = {}; });
+        updateGenPanel();
+    };
+
+    for (auto [slider, id] : std::initializer_list<std::pair<juce::Slider*, const char*>> {
+             { &arpPhrase, ParamIDs::arpPhrase }, { &arpVariation, ParamIDs::arpVariation }, { &arpReturn, ParamIDs::arpReturn },
+             { &arpAccent, ParamIDs::arpAccent }, { &arpHumanTime, ParamIDs::arpHumanTime }, { &arpHumanVel, ParamIDs::arpHumanVel } })
+        sliderAttachments.push_back (std::make_unique<SliderAttachment> (proc.apvts, id, *slider));
+
+    for (auto [button, id] : std::initializer_list<std::pair<juce::Button*, const char*>> {
+             { &varyPitch, ParamIDs::arpVaryPitch }, { &varyVelocity, ParamIDs::arpVaryVel }, { &varyRhythm, ParamIDs::arpVaryRhythm } })
+        buttonAttachments.push_back (std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (proc.apvts, id, *button));
+
+    ruleWhen.addItemList ({ "Step N of every", "Steps from N of every", "Phrase end (last N)", "Chance (N %)" }, 1);
+    ruleWhen.setSelectedId (1, juce::dontSendNotification);
+    ruleAction.addItemList ({ "Transpose", "Rest", "Accent", "Ratchet", "Passing tone" }, 1);
+    ruleAction.setSelectedId (1, juce::dontSendNotification);
+    ruleN.setRange (1, 100, 1);
+    ruleN.setValue (4, juce::dontSendNotification);
+    ruleOffset.setRange (1, 16, 1);
+    ruleOffset.setValue (1, juce::dontSendNotification);
+    ruleAmount.setRange (-24, 24, 1);
+    ruleAmount.setValue (12, juce::dontSendNotification);
+    addRule.onClick = [this]
+    {
+        neuro::ArpRule r;
+        r.when = (neuro::ArpRule::When) (ruleWhen.getSelectedId() - 1);
+        r.n = (int) ruleN.getValue();
+        r.offset = (int) ruleOffset.getValue() - 1; // UI counts steps from 1
+        r.action = (neuro::ArpRule::Action) (ruleAction.getSelectedId() - 1);
+        r.amount = (int) ruleAmount.getValue();
+        proc.editArpProgram ([r] (auto& prog) { prog.addRule (r); });
+        updateGenPanel();
+    };
+    removeRule.onClick = [this] { proc.editArpProgram ([] (auto& prog) { prog.numRules = juce::jmax (0, prog.numRules - 1); }); updateGenPanel(); };
+    clearRules.onClick = [this] { proc.editArpProgram ([] (auto& prog) { prog.numRules = 0; }); updateGenPanel(); };
+
+    // Grammar presets: ordinary, editable rules (shown in the list below).
+    grammarPresets.addItemList ({ "Octave climb", "Passing tones", "Phrase-end fill", "Accents 3-3-2", "Stutter & drop", "Call & answer" }, 1);
+    grammarPresets.setTextWhenNothingSelected ("Grammar preset...");
+    grammarPresets.onChange = [this]
+    {
+        using W = neuro::ArpRule::When;
+        using A = neuro::ArpRule::Action;
+        std::vector<neuro::ArpRule> rules;
+
+        switch (grammarPresets.getSelectedId())
+        {
+            case 1: rules = { { W::range, 8, 4, A::transpose, 12, true } }; break;
+            case 2: rules = { { W::every, 2, 1, A::passing, 1, true } }; break;
+            case 3: rules = { { W::phraseEnd, 2, 0, A::ratchet, 3, true }, { W::phraseEnd, 1, 0, A::transpose, 12, true } }; break;
+            case 4: rules = { { W::every, 8, 0, A::accent, 0, true }, { W::every, 8, 3, A::accent, 0, true }, { W::every, 8, 6, A::accent, 0, true } }; break;
+            case 5: rules = { { W::chance, 15, 0, A::ratchet, 2, true }, { W::chance, 10, 0, A::rest, 0, true } }; break;
+            case 6: rules = { { W::range, 16, 8, A::transpose, -12, true }, { W::every, 16, 15, A::passing, -1, true } }; break;
+            default: return;
+        }
+
+        proc.editArpProgram ([&] (auto& prog) { prog.numRules = 0; for (auto& r : rules) prog.addRule (r); });
+        grammarPresets.setSelectedId (0, juce::dontSendNotification);
+        updateGenPanel();
+    };
+
+    for (auto [slider, name] : std::initializer_list<std::pair<juce::Slider*, const char*>> {
+             { &patternLength, "Length" }, { &euclidPulses, "Pulses" }, { &euclidRotate, "Rotate" }, { &arpPhrase, "Phrase" },
+             { &arpVariation, "Variation" }, { &arpReturn, "Return" }, { &arpAccent, "Accent" }, { &arpHumanTime, "Feel ms" },
+             { &arpHumanVel, "Feel vel" }, { &ruleN, "N" }, { &ruleOffset, "Step" }, { &ruleAmount, "Amount" } })
+    {
+        slider->setTextBoxStyle (juce::Slider::TextBoxRight, false, 52, 20);
+        auto label = std::make_unique<juce::Label> (name, name);
+        label->setFont (juce::FontOptions (11.0f));
+        label->attachToComponent (slider, true);
+        knobLabels.push_back (std::move (label));
+    }
 
     // ---- Arp panel ----
     for (auto* c : arpPanelComponents())
@@ -419,8 +535,8 @@ NeuroMPCEditor::NeuroMPCEditor (NeuroMPCProcessor& p) : AudioProcessorEditor (p)
 
     showPanel (Panel::slice);
     setResizable (true, true);
-    setResizeLimits (1000, 700, 2400, 1600);
-    setSize (1120, 760);
+    setResizeLimits (1040, 780, 2400, 1600);
+    setSize (1140, 840);
     startTimerHz (30);
 }
 
@@ -505,7 +621,45 @@ std::vector<juce::Component*> NeuroMPCEditor::padPanelComponents()
 std::vector<juce::Component*> NeuroMPCEditor::arpPanelComponents()
 {
     return { &arpTitle, &arpActivity, &arpOn, &arpLatch, &arpDirection, &arpRate, &arpRetrigger, &arpGate, &arpSwing,
-             &arpChance, &arpOctaves, &arpRepeats, &arpVelocity, &arpSeed };
+             &arpChance, &arpOctaves, &arpRepeats, &arpVelocity, &arpSeed, &gesturePad };
+}
+
+std::vector<juce::Component*> NeuroMPCEditor::genPanelComponents()
+{
+    std::vector<juce::Component*> list { &genTitle, &rulesList, &patternLength, &euclidPulses, &euclidRotate, &arpPhrase,
+                                         &arpVariation, &arpReturn, &arpAccent, &arpHumanTime, &arpHumanVel, &ruleN, &ruleOffset,
+                                         &ruleAmount, &varyPitch, &varyVelocity, &varyRhythm, &euclidButton, &allOnButton,
+                                         &addRule, &removeRule, &clearRules, &ruleWhen, &ruleAction, &grammarPresets };
+
+    for (auto& b : stepButtons)
+        list.push_back (&b);
+
+    return list;
+}
+
+void NeuroMPCEditor::updateGenPanel()
+{
+    const auto& p = proc.getArpProgram();
+
+    for (int i = 0; i < neuro::ArpProgram::maxSteps; ++i)
+    {
+        const auto& st = p.steps[(size_t) i];
+        auto& b = stepButtons[(size_t) i];
+        b.setVisible (activePanel == Panel::gen && i < p.length);
+        b.setButtonText (! st.on ? juce::String ("-") : (st.accent ? "X" : "x") + (st.ratchet > 1 ? juce::String (st.ratchet) : juce::String()));
+        b.setColour (juce::TextButton::buttonColourId, ! st.on ? panel : st.accent ? accent : accent.withAlpha (0.45f));
+    }
+
+    if (! patternLength.isMouseButtonDown())
+        patternLength.setValue (p.length, juce::dontSendNotification);
+
+    juce::String text;
+
+    for (int i = 0; i < p.numRules; ++i)
+        text << (i + 1) << ". " << neuro::describe (p.rules[(size_t) i]) << "\n";
+
+    rulesList.setText (p.numRules == 0 ? juce::String ("Arpeggio Grammar: no rules (add one, or pick a preset)") : text,
+                       juce::dontSendNotification);
 }
 
 void NeuroMPCEditor::showPanel (Panel p)
@@ -515,13 +669,18 @@ void NeuroMPCEditor::showPanel (Panel p)
     for (auto* c : slicePanelComponents()) c->setVisible (p == Panel::slice);
     for (auto* c : padPanelComponents())   c->setVisible (p == Panel::pad);
     for (auto* c : arpPanelComponents())   c->setVisible (p == Panel::arp);
+    for (auto* c : genPanelComponents())   c->setVisible (p == Panel::gen);
+
+    info.setVisible (p != Panel::gen); // the generative panel uses the info area too
 
     sliceTab.setToggleState (p == Panel::slice, juce::dontSendNotification);
     padTab.setToggleState (p == Panel::pad, juce::dontSendNotification);
     arpTab.setToggleState (p == Panel::arp, juce::dontSendNotification);
+    genTab.setToggleState (p == Panel::gen, juce::dontSendNotification);
 
     if (p == Panel::pad) updatePadPanel();
     if (p == Panel::arp) updateArpPanel();
+    if (p == Panel::gen) updateGenPanel();
 }
 
 void NeuroMPCEditor::updateArpPanel()
@@ -702,6 +861,7 @@ void NeuroMPCEditor::timerCallback()
 
     if (activePanel == Panel::pad) updatePadPanel();
     if (activePanel == Panel::arp) updateArpPanel();
+    if (activePanel == Panel::arp) gesturePad.repaint();
 
     updateInfo();
     updateSlicePanel();
@@ -740,7 +900,7 @@ void NeuroMPCEditor::resized()
     keyMode.setBounds (top.removeFromLeft (80));
 
     area.removeFromTop (8);
-    auto bottom = area.removeFromBottom (juce::jmin (400, area.getHeight() * 3 / 5));
+    auto bottom = area.removeFromBottom (juce::jmin (460, area.getHeight() * 3 / 5));
     waveform.setBounds (area.withTrimmedBottom (8));
 
     // Bank selector over the pads; bottom row = pad 1 as on MPC hardware.
@@ -785,6 +945,7 @@ void NeuroMPCEditor::resized()
     sliceTab.setBounds (tabs.removeFromLeft (70));
     padTab.setBounds (tabs.removeFromLeft (70));
     arpTab.setBounds (tabs.removeFromLeft (70));
+    genTab.setBounds (tabs.removeFromLeft (70));
     bottom.removeFromTop (6);
     const auto panelArea = bottom.removeFromTop (142);
 
@@ -821,7 +982,80 @@ void NeuroMPCEditor::resized()
         padRow3.removeFromLeft (6);
     }
 
+    // Generative panel: the panel area plus the info area below it.
+    {
+        auto gp = panelArea.withBottom (bottom.getBottom());
+        auto rowOf = [&gp] (int gap = 6) { gp.removeFromTop (gap); return gp.removeFromTop (24); };
+        auto r0 = gp.removeFromTop (24);
+        genTitle.setBounds (r0.removeFromLeft (76));
+
+        for (auto& b : stepButtons)
+            b.setBounds (r0.removeFromLeft (28).reduced (1, 0));
+
+        r0.removeFromLeft (56);
+        patternLength.setBounds (r0.removeFromLeft (juce::jmax (80, r0.getWidth())));
+
+        auto r1 = rowOf();
+        r1.removeFromLeft (50);
+        euclidPulses.setBounds (r1.removeFromLeft (150));
+        r1.removeFromLeft (50);
+        euclidRotate.setBounds (r1.removeFromLeft (150));
+        r1.removeFromLeft (8);
+        euclidButton.setBounds (r1.removeFromLeft (64));
+        r1.removeFromLeft (6);
+        allOnButton.setBounds (r1.removeFromLeft (64));
+
+        auto r2 = rowOf();
+        const auto third = (r2.getWidth() - 3 * 60) / 3;
+
+        for (auto* sld : { &arpPhrase, &arpVariation, &arpReturn })
+        {
+            r2.removeFromLeft (60);
+            sld->setBounds (r2.removeFromLeft (third));
+        }
+
+        auto r3 = rowOf();
+        r3.removeFromLeft (60);
+        varyPitch.setBounds (r3.removeFromLeft (70));
+        varyVelocity.setBounds (r3.removeFromLeft (84));
+        varyRhythm.setBounds (r3.removeFromLeft (76));
+
+        for (auto* sld : { &arpAccent, &arpHumanTime, &arpHumanVel })
+        {
+            r3.removeFromLeft (58);
+            sld->setBounds (r3.removeFromLeft ((r3.getWidth() - 2 * 58) / (sld == &arpHumanVel ? 1 : (sld == &arpAccent ? 3 : 2))));
+        }
+
+        auto r4 = rowOf (10);
+        ruleWhen.setBounds (r4.removeFromLeft (160));
+
+        for (auto* sld : { &ruleN, &ruleOffset })
+        {
+            r4.removeFromLeft (40);
+            sld->setBounds (r4.removeFromLeft (110));
+        }
+
+        r4.removeFromLeft (6);
+        ruleAction.setBounds (r4.removeFromLeft (120));
+        r4.removeFromLeft (54);
+        ruleAmount.setBounds (r4.removeFromLeft (120));
+        r4.removeFromLeft (6);
+        addRule.setBounds (r4.removeFromLeft (50));
+
+        auto r5 = rowOf();
+        grammarPresets.setBounds (r5.removeFromLeft (160));
+        r5.removeFromLeft (6);
+        removeRule.setBounds (r5.removeFromLeft (96));
+        r5.removeFromLeft (6);
+        clearRules.setBounds (r5.removeFromLeft (90));
+
+        gp.removeFromTop (6);
+        rulesList.setBounds (gp);
+    }
+
     auto ap = panelArea;
+    gesturePad.setBounds (ap.removeFromRight (juce::jmin (ap.getHeight(), 130)));
+    ap.removeFromRight (10);
     auto arpRow0 = ap.removeFromTop (22);
     arpTitle.setBounds (arpRow0.removeFromLeft (130));
     arpOn.setBounds (arpRow0.removeFromLeft (60));

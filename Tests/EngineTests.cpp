@@ -591,6 +591,44 @@ int main()
                && (int) h.apvts.getRawParameterValue (ParamIDs::arpRate)->load() == 4);
     }
 
+    // ---- Phase 11: rhythm pattern, ratchets and grammar through the audio output ----
+    {
+        writeTestWav (wavFile);
+        NeuroMPCProcessor g;
+        g.prepareToPlay (rate, block);
+        CHECK (g.loadSample (wavFile, error));
+        g.editSlices ([] (auto& s) { s.grid (4); });
+        setParam (g, ParamIDs::attack, 0.0f);
+        setParam (g, ParamIDs::release, 1.0f);
+        setParam (g, ParamIDs::playMode, 1.0f);
+        setParam (g, ParamIDs::arpOn, 1.0f);
+        // Pattern: step 1 ratchet x2, step 2 rest. Grammar: every 3rd step transposes +1 (pad 36 -> pad 37).
+        g.editArpProgram ([] (auto& p)
+        {
+            p.length = 2;
+            p.steps[0].ratchet = 2;
+            p.steps[1].on = false;
+            p.addRule ({ neuro::ArpRule::When::every, 3, 2, neuro::ArpRule::Action::transpose, 1, true });
+        });
+
+        auto x = capture (g, 70, { { 0, 36, 1.0f } });
+        const auto at = [&] (int sample) { return std::abs (x[(size_t) sample]); };
+        std::printf ("  pattern: hit1 %.2f gap %.2f hit2 %.2f rest %.2f step3 %.2f step5 %.2f\n",
+                     at (500), at (2200), at (3500), at (8000), at (12500), at (24500));
+        CHECK (std::abs (at (500) - 0.1f) < 0.005f && at (2200) == 0.0f && std::abs (at (3500) - 0.1f) < 0.005f); // ratchet
+        CHECK (at (8000) == 0.0f);                       // step 2 rests
+        CHECK (std::abs (at (12500) - 0.2f) < 0.005f);   // step 3: grammar +1 -> pad 37 (0.2)
+        CHECK (std::abs (at (24500) - 0.1f) < 0.005f);   // step 5: pattern step 1 again, no rule
+
+        juce::MemoryBlock st;
+        g.getStateInformation (st);
+        NeuroMPCProcessor h;
+        h.setStateInformation (st.getData(), (int) st.getSize());
+        const auto& prog = h.getArpProgram();
+        CHECK (prog.length == 2 && prog.steps[0].ratchet == 2 && ! prog.steps[1].on && prog.numRules == 1
+               && prog.rules[0].offset == 2 && prog.rules[0].amount == 1);
+    }
+
     // Missing file on restore is reported, not substituted.
     wavFile.deleteFile();
     NeuroMPCProcessor m;

@@ -37,6 +37,15 @@ namespace ParamIDs
     inline constexpr auto arpVelocity  = "arpVelocity";
     inline constexpr auto arpRetrigger = "arpRetrigger";
     inline constexpr auto arpSeed      = "arpSeed";
+    inline constexpr auto arpAccent    = "arpAccent";
+    inline constexpr auto arpPhrase    = "arpPhrase";
+    inline constexpr auto arpVariation = "arpVariation";
+    inline constexpr auto arpVaryPitch = "arpVaryPitch";
+    inline constexpr auto arpVaryVel   = "arpVaryVelocity";
+    inline constexpr auto arpVaryRhythm = "arpVaryRhythm";
+    inline constexpr auto arpReturn    = "arpReturn";
+    inline constexpr auto arpHumanTime = "arpHumanTime";
+    inline constexpr auto arpHumanVel  = "arpHumanVelocity";
 }
 
 class NeuroMPCProcessor : public juce::AudioProcessor,
@@ -80,6 +89,10 @@ public:
     int getLastMidiNote() const noexcept                        { return lastMidiNote.load(); } // for MIDI learn
     int getMidiNoteCount() const noexcept                       { return midiNoteCount.load(); }
 
+    // Arpeggiator rhythm pattern + grammar rules (message thread; published to the audio thread on edit).
+    const neuro::ArpProgram& getArpProgram() const noexcept     { return arpProgram; }
+    void editArpProgram (const std::function<void (neuro::ArpProgram&)>&);
+
     // Arpeggiator live activity for the UI.
     int getArpLastNote() const noexcept                         { return arpLastNote.load(); }
     int getArpHeldCount() const noexcept                        { return arpHeldCount.load(); }
@@ -118,7 +131,7 @@ private:
     void refreshAnalysis();
     void updateKeyboardMap();
     void renderWithModulation (juce::AudioBuffer<float>&, int from, int to);
-    void updateArpSettings();
+    void updateArpSettings (double bpm);
     void timerCallback() override { processBackgroundResults(); }
 
     std::shared_ptr<const neuro::SampleData> sample;
@@ -171,13 +184,18 @@ private:
         int offset; Type type; int note; float value; int slice;
     };
     neuro::Arpeggiator arp;
+    neuro::ArpProgram arpProgram;
+    neuro::RtShared<neuro::ArpProgram> rtArpProgram;
     std::array<Event, 1024> events {};
     double freeBeatOrigin = 0.0;
     bool arpWasOn = false, arpWasPlaying = false;
     std::atomic<int> arpLastNote { -1 }, arpHeldCount { 0 };
     std::atomic<float> *arpOnParam = nullptr, *arpLatchParam = nullptr, *arpDirectionParam = nullptr, *arpRateParam = nullptr,
                        *arpGateParam = nullptr, *arpOctavesParam = nullptr, *arpSwingParam = nullptr, *arpChanceParam = nullptr,
-                       *arpRepeatsParam = nullptr, *arpVelocityParam = nullptr, *arpRetriggerParam = nullptr, *arpSeedParam = nullptr;
+                       *arpRepeatsParam = nullptr, *arpVelocityParam = nullptr, *arpRetriggerParam = nullptr, *arpSeedParam = nullptr,
+                       *arpAccentParam = nullptr, *arpPhraseParam = nullptr, *arpVariationParam = nullptr, *arpVaryPitchParam = nullptr,
+                       *arpVaryVelParam = nullptr, *arpVaryRhythmParam = nullptr, *arpReturnParam = nullptr,
+                       *arpHumanTimeParam = nullptr, *arpHumanVelParam = nullptr;
 
     neuro::PadBank pads;
     neuro::RtShared<neuro::PadMap> rtPads;
