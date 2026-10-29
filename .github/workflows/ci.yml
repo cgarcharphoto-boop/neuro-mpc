@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  macos:
+    runs-on: macos-14 # Apple Silicon
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch pinned JUCE
+        run: Scripts/fetch-juce.sh
+
+      - name: Configure
+        run: cmake -S . -B build -G Xcode
+
+      - name: Build (VST3, AU, Standalone, tests)
+        run: cmake --build build --config Release --parallel 3 -- -quiet
+
+      - name: Unit and integration tests
+        run: ctest --test-dir build -C Release --output-on-failure
+
+      - name: Validate AU
+        run: |
+          killall -9 AudioComponentRegistrar || true
+          auval -v aumu Nm26 Nrmp
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: neuro-mpc-macos-arm64
+          path: |
+            build/NEURO_MPC_artefacts/Release/VST3/NEURO MPC.vst3
+            build/NEURO_MPC_artefacts/Release/AU/NEURO MPC.component
+            build/NEURO_MPC_artefacts/Release/Standalone/NEURO MPC.app

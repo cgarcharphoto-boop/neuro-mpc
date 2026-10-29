@@ -936,6 +936,42 @@ int main()
         hs.setPlayHead (nullptr);
     }
 
+    // ---- Performance (spec 28.3): worst-case load vs real time ----
+    {
+        writeTestWav (wavFile);
+        NeuroMPCProcessor perf;
+        perf.prepareToPlay (rate, block);
+        CHECK (perf.loadSample (wavFile, error));
+        perf.editSlices ([] (auto& s) { s.grid (16); });
+        setParam (perf, ParamIDs::lfoDepth, 2.0f);           // per-sample pitch modulation on every voice
+        setParam (perf, ParamIDs::arpOn, 1.0f);
+        setParam (perf, ParamIDs::seqMode, 2.0f);
+        setParam (perf, ParamIDs::seqRate, 5.0f);            // 1/32
+        perf.editSeqPattern (0, [] (auto& pat)
+        {
+            pat.numLanes = 16;
+            for (auto& lane : pat.lanes)
+                for (int i = 0; i < 16; ++i)
+                    lane.steps[(size_t) i] = { true, 0.8f, 1.0f, 1.0f, 4, 0.0f, 3.0f }; // every step, ratchet x4
+        });
+        juce::AudioBuffer<float> buf (2, block);
+        juce::MidiBuffer held;
+        for (int n = 40; n < 52; ++n) held.addEvent (juce::MidiMessage::noteOn (1, n, 1.0f), 0);
+        perf.processBlock (buf, held);
+
+        const int blocks = (int) (10.0 * rate / block); // 10 s of audio
+        const auto t0 = juce::Time::getMillisecondCounterHiRes();
+        for (int b = 0; b < blocks; ++b)
+        {
+            juce::MidiBuffer none;
+            perf.processBlock (buf, none);
+        }
+        const auto ms = juce::Time::getMillisecondCounterHiRes() - t0;
+        const auto load = ms / 10000.0 * 100.0;
+        std::printf ("  worst case (32 voices + LFO + 16-lane 1/32 x4 ratchets + arp): 10 s audio in %.0f ms = %.2f%% of one core\n", ms, load);
+        CHECK (load < 25.0);
+    }
+
     // Missing file on restore is reported, not substituted.
     wavFile.deleteFile();
     NeuroMPCProcessor m;
