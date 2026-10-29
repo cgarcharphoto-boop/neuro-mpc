@@ -3,9 +3,11 @@
 An open-source, MPC-style slice sampler for macOS: VST3 (Ableton Live), AU (Logic Pro), and Standalone.
 C++20 · JUCE 9.0.4 (pinned) · CMake. The master spec lives in `../gmni sampler/`.
 
-## Status: Milestones 1–3 + Phase 14 (Phases 1–14: sampler, slicing, time-stretch, pitch analysis, chromatic pitch, pads, arpeggiator + generative, step sequencer + advanced sequencing, state/automation hardening)
+## Status: v0.1.0, all 15 specification phases implemented
 
-| Works and is tested | |
+The acceptance status of each requirement, with evidence, is in [Documentation/ACCEPTANCE.md](Documentation/ACCEPTANCE.md). **Still open:** testing in Ableton Live and Logic Pro, a pluginval run on the VST3, and listening and UI usability tests.
+
+| Feature | |
 |---|---|
 | Sample import | WAV/AIFF/FLAC/OGG/MP3 via JUCE + CoreAudio; drag-and-drop or Load; mono and stereo (first 2 ch); ≤200M floats |
 | Waveform | Multiresolution peaks (AudioThumbnail), zoom (wheel/pinch around the cursor), horizontal pan, live playhead |
@@ -20,10 +22,23 @@ C++20 · JUCE 9.0.4 (pinned) · CMake. The master spec lives in `../gmni sampler
 | Step sequencer | 16 patterns × 16 lanes, per-lane length (polymeter) and mute, per-step velocity/gate/probability/ratchet/microtiming/pitch, swing, host-transport or free-running; stateless deterministic timing. Advanced: trig conditions (A:B, first, fill, previous), transformations with undo/redo, Pattern Genome recombination, seeded Mutation with A/B compare, Phrase Weaving. See [Documentation/SEQUENCER.md](Documentation/SEQUENCER.md) |
 | Real-time safety | No locks, file I/O or allocation on the audio thread. Samples and slices reach the audio thread through `RtShared` (hazard-pointer handoff); UI note input goes through a lock-free FIFO |
 
-**Validation:** `auval` passes. Unit and integration tests pass (`ctest`).
-**Not yet done:** VST3 pluginval run, and manual testing inside Live and Logic.
+**Validation:**
+- `auval` passes.
+- About 340 automated checks pass (`ctest`). Most assert on rendered audio, with exact sample timing, levels, pitch, determinism and robustness.
+- A clean checkout builds and passes.
+- CI: `.github/workflows/ci.yml`.
 
-**Known limitations:** linear interpolation (resampling can alias); stretched slices play the original until their render is ready; files load on the message thread with no progress bar; no undo yet; arm64 only.
+**Performance:** the worst case measured, 32 voices plus pitch LFO, a 16-lane 1/32 sequencer with ratchets, and the arpeggiator, uses about 0.4% of one Apple Silicon core.
+
+## Documentation
+| | |
+|---|---|
+| [ARCHITECTURE](Documentation/ARCHITECTURE.md) | threads, ownership, block processing, modules |
+| [BUILD](Documentation/BUILD.md) · [TESTING](Documentation/TESTING.md) · [ACCEPTANCE](Documentation/ACCEPTANCE.md) | build, test and release status |
+| [TIME_STRETCHING](Documentation/TIME_STRETCHING.md) · [PITCH_ANALYSIS](Documentation/PITCH_ANALYSIS.md) · [PITCH_SHIFTING](Documentation/PITCH_SHIFTING.md) | DSP, with measured results |
+| [PADS](Documentation/PADS.md) · [ARPEGGIATOR](Documentation/ARPEGGIATOR.md) · [SEQUENCER](Documentation/SEQUENCER.md) | performance features |
+| [STATE_AND_AUTOMATION](Documentation/STATE_AND_AUTOMATION.md) · [LICENSES](Documentation/LICENSES.md) | parameters, state, presets, licences |
+| [CONTRIBUTING](CONTRIBUTING.md) · [CHANGELOG](CHANGELOG.md) · [SECURITY](SECURITY.md) | project |
 
 ## Build
 
@@ -38,11 +53,11 @@ Builds are installed to `~/Library/Audio/Plug-Ins/{VST3,Components}`. The Standa
 ## Layout
 
 ```
-Source/Core/    JUCE-free model + DSP: SliceSet, TransientDetector, PitchDetector, KeyDetector, RtShared (unit-tested)
+Source/Core/    JUCE-free model + logic: slices, analysis, scales, pads, arpeggiator, sequencer, pattern tools, RtShared (unit-tested)
 Source/Audio/   SampleData, VoiceEngine
 Source/DSP/     TimeStretch, Analysis, BackgroundWorker (coalescing job thread)
 ThirdParty/     vendored MIT header libraries (Documentation/LICENSES.md)
-Source/UI/      WaveformView
+Source/UI/      WaveformView, SeqGrid, GesturePad
 Source/Plugin*  processor (params, MIDI, state) and editor
 Tests/          CoreTests (pure C++), EngineTests (headless processor integration)
 ```
