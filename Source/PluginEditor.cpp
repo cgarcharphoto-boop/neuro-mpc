@@ -98,7 +98,7 @@ void NeuroMPCEditor::Pad::mouseUp (const juce::MouseEvent&)
 
 NeuroMPCEditor::NeuroMPCEditor (NeuroMPCProcessor& p) : AudioProcessorEditor (p), proc (p)
 {
-    for (auto* c : std::initializer_list<juce::Component*> { &waveform, &loadButton, &autoButton, &gridButton,
+    for (auto* c : std::initializer_list<juce::Component*> { &presetBox, &savePresetButton, &relinkButton, &waveform, &loadButton, &autoButton, &gridButton,
                                                              &clearButton, &sensitivity, &gridDivisions, &playMode, &info,
                                                              &sliceTitle, &durationInfo, &targetSeconds, &stretch,
                                                              &halfButton, &doubleButton, &resetButton, &allButton,
@@ -731,6 +731,55 @@ NeuroMPCEditor::NeuroMPCEditor (NeuroMPCProcessor& p) : AudioProcessorEditor (p)
              { &scaleRoot, ParamIDs::scaleRoot }, { &lfoShape, ParamIDs::lfoShape }, { &lfoSync, ParamIDs::lfoSync } })
         comboAttachments.push_back (std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment> (proc.apvts, id, *box));
 
+    // ---- Presets and relinking ----
+    presetBox.setTextWhenNothingSelected ("Presets");
+    presetBox.setTooltip ("Presets are saved in ~/Library/Audio/Presets/NEURO MPC");
+    presetBox.onChange = [this]
+    {
+        const auto index = presetBox.getSelectedId() - 1;
+
+        if (juce::isPositiveAndBelow (index, presetFiles.size()) && ! proc.loadPreset (presetFiles[index]))
+            lastError = "Could not load preset " + presetFiles[index].getFileName();
+    };
+    savePresetButton.setTooltip ("Save the current state (sample reference, slices, pads, arp, sequencer, parameters) as a preset");
+    savePresetButton.onClick = [this]
+    {
+        auto* window = new juce::AlertWindow ("Save preset", "Preset name:", juce::MessageBoxIconType::NoIcon, this);
+        window->addTextEditor ("name", proc.getCurrentPresetName());
+        window->addButton ("Save", 1, juce::KeyPress (juce::KeyPress::returnKey));
+        window->addButton ("Cancel", 0, juce::KeyPress (juce::KeyPress::escapeKey));
+        window->enterModalState (true, juce::ModalCallbackFunction::create ([this, window] (int result)
+        {
+            if (result == 1 && ! proc.savePreset (window->getTextEditorContents ("name")))
+                lastError = "Could not save the preset";
+
+            refreshPresets();
+        }), true);
+    };
+    relinkButton.setTooltip ("Locate the missing sample: pick the file, or a folder to search");
+    relinkButton.onClick = [this]
+    {
+        chooser = std::make_unique<juce::FileChooser> ("Locate " + juce::File (proc.getMissingSamplePath()).getFileName(), juce::File(),
+                                                       proc.formats.getWildcardForAllFormats());
+        chooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles
+                                  | juce::FileBrowserComponent::canSelectDirectories,
+                              [this] (const juce::FileChooser& fc)
+                              {
+                                  auto target = fc.getResult();
+
+                                  if (target.isDirectory())
+                                      target = proc.findMissingSampleIn (target);
+
+                                  lastError.clear();
+
+                                  if (! target.existsAsFile())
+                                      lastError = "Not found: " + juce::File (proc.getMissingSamplePath()).getFileName();
+                                  else if (! proc.relinkSample (target, lastError))
+                                      lastError = "Relink failed: " + lastError;
+                              });
+    };
+    refreshPresets();
+
     loadButton.onClick = [this]
     {
         chooser = std::make_unique<juce::FileChooser> ("Load sample", juce::File(), proc.formats.getWildcardForAllFormats());
@@ -827,8 +876,27 @@ void NeuroMPCEditor::load (const juce::File& file)
 {
     lastError.clear();
 
-    if (! proc.loadSample (file, lastError))
+    // Loading the missing file (same name) is a relink: its saved slices come back.
+    const auto missing = proc.getMissingSamplePath();
+    const auto ok = missing.isNotEmpty() && file.getFileName() == juce::File (missing).getFileName()
+                        ? proc.relinkSample (file, lastError)
+                        : proc.loadSample (file, lastError);
+
+    if (! ok)
         updateInfo();
+}
+
+void NeuroMPCEditor::refreshPresets()
+{
+    presetFiles = proc.getPresets();
+    presetBox.clear (juce::dontSendNotification);
+
+    for (int i = 0; i < presetFiles.size(); ++i)
+        presetBox.addItem (presetFiles[i].getFileNameWithoutExtension(), i + 1);
+
+    for (int i = 0; i < presetFiles.size(); ++i)
+        if (presetFiles[i].getFileNameWithoutExtension() == proc.getCurrentPresetName())
+            presetBox.setSelectedId (i + 1, juce::dontSendNotification);
 }
 
 void NeuroMPCEditor::filesDropped (const juce::StringArray& files, int, int)
@@ -1233,6 +1301,8 @@ void NeuroMPCEditor::timerCallback()
         waveform.sampleChanged();
     }
 
+    relinkButton.setVisible (proc.getMissingSamplePath().isNotEmpty());
+
     // MIDI learn: the first note-on after Learn was pressed becomes the pad's note.
     if (learnBaseline >= 0 && proc.getMidiNoteCount() != learnBaseline)
     {
@@ -1267,7 +1337,7 @@ void NeuroMPCEditor::paint (juce::Graphics& g)
     g.fillAll (background);
     g.setColour (accent);
     g.setFont (juce::FontOptions (18.0f, juce::Font::bold));
-    g.drawText ("NEURO MPC", getLocalBounds().removeFromTop (44).reduced (12, 0), juce::Justification::centredRight);
+    g.drawText ("NEURO MPC", titleArea, juce::Justification::centredRight);
 }
 
 void NeuroMPCEditor::resized()
@@ -1292,6 +1362,12 @@ void NeuroMPCEditor::resized()
     playMode.setBounds (top.removeFromLeft (100));
     top.removeFromLeft (6);
     keyMode.setBounds (top.removeFromLeft (80));
+    top.removeFromLeft (12);
+    presetBox.setBounds (top.removeFromLeft (140));
+    top.removeFromLeft (4);
+    savePresetButton.setBounds (top.removeFromLeft (48));
+    top.removeFromLeft (6);
+    relinkButton.setBounds (top.removeFromLeft (76));
 
     area.removeFromTop (8);
     auto bottom = area.removeFromBottom (juce::jmin (460, area.getHeight() * 3 / 5));
@@ -1342,6 +1418,7 @@ void NeuroMPCEditor::resized()
     genTab.setBounds (tabs.removeFromLeft (70));
     seqTab.setBounds (tabs.removeFromLeft (70));
     evolveTab.setBounds (tabs.removeFromLeft (76));
+    titleArea = tabs;
     bottom.removeFromTop (6);
     const auto panelArea = bottom.removeFromTop (142);
 

@@ -4,7 +4,6 @@
 
 namespace
 {
-    constexpr int stateVersion = 1;
     constexpr int64_t maxSampleFloats = 200'000'000; // ~800 MB: documented memory limit for one sample
 }
 
@@ -544,6 +543,7 @@ void NeuroMPCProcessor::updateArpSettings (double bpm)
 
 bool NeuroMPCProcessor::loadSample (const juce::File& file, juce::String& error)
 {
+    const std::scoped_lock lock (modelLock);
     std::unique_ptr<juce::AudioFormatReader> reader (formats.createReaderFor (file));
 
     if (reader == nullptr)
@@ -588,11 +588,13 @@ bool NeuroMPCProcessor::loadSample (const juce::File& file, juce::String& error)
     slices.reset (length);
     publishSlices();
     missingSamplePath.clear();
+    pendingSliceTree = {};
     return true;
 }
 
 void NeuroMPCProcessor::editSlices (const std::function<void (neuro::SliceSet&)>& edit)
 {
+    const std::scoped_lock lock (modelLock);
     edit (slices);
     publishSlices();
 }
@@ -614,6 +616,7 @@ void NeuroMPCProcessor::publishSlices()
 
 void NeuroMPCProcessor::setKeyboardSlice (int sliceIndex)
 {
+    const std::scoped_lock lock (modelLock);
     keyboardSlice = juce::jmax (0, sliceIndex);
     updateKeyboardMap();
 }
@@ -666,6 +669,7 @@ void NeuroMPCProcessor::stopAudition (int tag)
 
 void NeuroMPCProcessor::editSeqPattern (int index, const std::function<void (neuro::SeqPattern&)>& edit, Undo undo)
 {
+    const std::scoped_lock lock (modelLock);
     const auto i = (size_t) juce::jlimit (0, numSeqPatterns - 1, index);
     const auto now = juce::Time::getMillisecondCounterHiRes();
 
@@ -688,6 +692,7 @@ void NeuroMPCProcessor::editSeqPattern (int index, const std::function<void (neu
 
 bool NeuroMPCProcessor::undoSeqPattern (int index)
 {
+    const std::scoped_lock lock (modelLock);
     const auto i = (size_t) juce::jlimit (0, numSeqPatterns - 1, index);
 
     if (seqUndo[i].empty())
@@ -703,6 +708,7 @@ bool NeuroMPCProcessor::undoSeqPattern (int index)
 
 bool NeuroMPCProcessor::redoSeqPattern (int index)
 {
+    const std::scoped_lock lock (modelLock);
     const auto i = (size_t) juce::jlimit (0, numSeqPatterns - 1, index);
 
     if (seqRedo[i].empty())
@@ -718,6 +724,7 @@ bool NeuroMPCProcessor::redoSeqPattern (int index)
 
 void NeuroMPCProcessor::editArpProgram (const std::function<void (neuro::ArpProgram&)>& edit)
 {
+    const std::scoped_lock lock (modelLock);
     edit (arpProgram);
     rtArpProgram.publish (std::make_shared<const neuro::ArpProgram> (arpProgram));
     seqModeParam    = apvts.getRawParameterValue (ParamIDs::seqMode);
@@ -735,6 +742,7 @@ void NeuroMPCProcessor::editArpProgram (const std::function<void (neuro::ArpProg
 
 void NeuroMPCProcessor::editPads (const std::function<void (neuro::PadBank&)>& edit)
 {
+    const std::scoped_lock lock (modelLock);
     edit (pads);
     publishPads();
 }
@@ -917,10 +925,17 @@ void NeuroMPCProcessor::pushUiNote (int note, float velocity, int slice)
 
 void NeuroMPCProcessor::getStateInformation (juce::MemoryBlock& dest)
 {
+    if (auto xml = createStateTree().createXml())
+        copyXmlToBinary (*xml, dest);
+}
+
+juce::ValueTree NeuroMPCProcessor::createStateTree() const
+{
+    const std::scoped_lock lock (modelLock);
     juce::ValueTree root ("NEURO_MPC");
     root.setProperty ("version", stateVersion, nullptr);
     root.setProperty ("keyboardSlice", keyboardSlice, nullptr);
-    root.appendChild (apvts.copyState(), nullptr);
+    root.appendChild (const_cast<juce::AudioProcessorValueTreeState&> (apvts).copyState(), nullptr);
 
     juce::ValueTree sampleTree ("SAMPLE");
     sampleTree.setProperty ("path", sample != nullptr ? sample->file.getFullPathName() : missingSamplePath, nullptr);
@@ -928,7 +943,10 @@ void NeuroMPCProcessor::getStateInformation (juce::MemoryBlock& dest)
 
     juce::ValueTree sliceTree ("SLICES");
 
-    for (const auto& s : slices.getSlices())
+    if (sample == nullptr && pendingSliceTree.isValid())
+        sliceTree = pendingSliceTree.createCopy(); // keep the layout of a missing sample
+
+    for (const auto& s : sample != nullptr ? slices.getSlices() : std::vector<neuro::SliceDefinition> {})
     {
         juce::ValueTree t ("SLICE");
         t.setProperty ("id", s.id, nullptr);
@@ -1052,19 +1070,37 @@ void NeuroMPCProcessor::getStateInformation (juce::MemoryBlock& dest)
     }
 
     root.appendChild (seqTree, nullptr);
-
-    if (auto xml = root.createXml())
-        copyXmlToBinary (*xml, dest);
+    return root;
 }
 
 void NeuroMPCProcessor::setStateInformation (const void* data, int size)
 {
-    auto xml = getXmlFromBinary (data, size);
-
-    if (xml == nullptr)
+    if (data == nullptr || size <= 0)
         return;
 
-    auto root = juce::ValueTree::fromXml (*xml);
+    if (auto xml = getXmlFromBinary (data, size))
+        applyStateTree (juce::ValueTree::fromXml (*xml));
+}
+
+// Upgrades older state trees in place. Version 1 (Milestone 1) had no pads, arp, sequencer or pitch fields; every
+// later field is optional with a default, so v1 loads as-is. Newer versions load best-effort (unknown data ignored).
+void NeuroMPCProcessor::migrate (juce::ValueTree& root)
+{
+    const auto version = (int) root.getProperty ("version", 1);
+
+    if (version < 2)
+        root.setProperty ("version", 2, nullptr);
+}
+
+bool NeuroMPCProcessor::applyStateTree (juce::ValueTree root)
+{
+    if (! root.hasType ("NEURO_MPC"))
+        return false;
+
+    const std::scoped_lock lock (modelLock);
+    loadedNewerVersion = (int) root.getProperty ("version", 1) > stateVersion;
+    migrate (root);
+    pendingSliceTree = {};
 
     if (auto params = root.getChildWithName (apvts.state.getType()); params.isValid())
         apvts.replaceState (params);
@@ -1157,20 +1193,30 @@ void NeuroMPCProcessor::setStateInformation (const void* data, int size)
     const auto path = root.getChildWithName ("SAMPLE")["path"].toString();
 
     if (path.isEmpty())
-        return;
+        return true;
 
     juce::String error;
 
-    // A missing file is reported, never silently substituted.
-    if (! loadSample (juce::File (path), error))
+    // A missing file is reported, never silently substituted; its slices wait for a relink.
+    if (! juce::File::isAbsolutePath (path) || ! loadSample (juce::File (path), error))
     {
         missingSamplePath = path;
-        return;
+        pendingSliceTree = root.getChildWithName ("SLICES").createCopy();
+        return true;
     }
+
+    restoreSlicesFrom (root.getChildWithName ("SLICES"));
+    return true;
+}
+
+void NeuroMPCProcessor::restoreSlicesFrom (const juce::ValueTree& sliceTree)
+{
+    if (sample == nullptr)
+        return;
 
     std::vector<neuro::SliceDefinition> restored;
 
-    for (const auto& t : root.getChildWithName ("SLICES"))
+    for (const auto& t : sliceTree)
     {
         neuro::SliceDefinition s;
         s.id = t["id"];
@@ -1187,8 +1233,75 @@ void NeuroMPCProcessor::setStateInformation (const void* data, int size)
         restored.push_back (s);
     }
 
-    slices.restore (sample->length(), std::move (restored));
+    slices.restore (sample->length(), std::move (restored)); // invalid layouts fall back to one slice
     publishSlices();
+}
+
+bool NeuroMPCProcessor::relinkSample (const juce::File& file, juce::String& error)
+{
+    const std::scoped_lock lock (modelLock);
+    const auto pending = pendingSliceTree;
+
+    if (! loadSample (file, error))
+        return false;
+
+    if (pending.isValid())
+        restoreSlicesFrom (pending); // only applied if it matches the new file's length
+
+    pendingSliceTree = {};
+    return true;
+}
+
+juce::File NeuroMPCProcessor::findMissingSampleIn (const juce::File& folder) const
+{
+    const auto name = juce::File (missingSamplePath).getFileName();
+
+    if (name.isEmpty() || ! folder.isDirectory())
+        return {};
+
+    juce::RangedDirectoryIterator it (folder, true, name, juce::File::findFiles);
+    return it != juce::RangedDirectoryIterator() ? it->getFile() : juce::File();
+}
+
+juce::File NeuroMPCProcessor::getPresetDirectory() const
+{
+    return presetDirectory != juce::File() ? presetDirectory
+                                           : juce::File::getSpecialLocation (juce::File::userHomeDirectory)
+                                                 .getChildFile ("Library/Audio/Presets/NEURO MPC/NEURO MPC");
+}
+
+juce::Array<juce::File> NeuroMPCProcessor::getPresets() const
+{
+    auto files = getPresetDirectory().findChildFiles (juce::File::findFiles, false, "*.neurompc");
+    files.sort();
+    return files;
+}
+
+bool NeuroMPCProcessor::savePreset (const juce::String& name)
+{
+    const auto clean = juce::File::createLegalFileName (name.trim());
+
+    if (clean.isEmpty() || ! getPresetDirectory().createDirectory())
+        return false;
+
+    auto xml = createStateTree().createXml();
+
+    if (xml == nullptr || ! xml->writeTo (getPresetDirectory().getChildFile (clean + ".neurompc")))
+        return false;
+
+    currentPresetName = clean;
+    return true;
+}
+
+bool NeuroMPCProcessor::loadPreset (const juce::File& file)
+{
+    const auto xml = juce::XmlDocument::parse (file);
+
+    if (xml == nullptr || ! applyStateTree (juce::ValueTree::fromXml (*xml)))
+        return false;
+
+    currentPresetName = file.getFileNameWithoutExtension();
+    return true;
 }
 
 juce::AudioProcessorEditor* NeuroMPCProcessor::createEditor()

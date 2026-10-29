@@ -65,7 +65,12 @@ private:
 
     NeuroMPCProcessor& proc;
     WaveformView waveform { proc };
-    juce::TextButton loadButton { "Load" }, autoButton { "Auto-Slice" }, gridButton { "Grid" }, clearButton { "Clear" };
+    juce::TextButton loadButton { "Load" }, autoButton { "Auto-Slice" }, gridButton { "Grid" }, clearButton { "Clear" },
+                     savePresetButton { "Save" }, relinkButton { "Relink..." };
+    juce::ComboBox presetBox;
+    juce::Rectangle<int> titleArea;
+    juce::Array<juce::File> presetFiles;
+    void refreshPresets();
     juce::Slider sensitivity { juce::Slider::LinearHorizontal, juce::Slider::NoTextBox };
     juce::ComboBox gridDivisions, playMode;
     juce::Slider gain, attack, release;

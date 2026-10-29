@@ -129,6 +129,22 @@ namespace
         return est.status == neuro::PitchEstimate::Status::pitched ? est.midi : -1.0;
     }
 
+    // Host transport stand-in for sync tests.
+    struct MockPlayHead : juce::AudioPlayHead
+    {
+        double bpm = 120.0, ppq = 0.0;
+        bool playing = false;
+
+        juce::Optional<PositionInfo> getPosition() const override
+        {
+            PositionInfo info;
+            info.setBpm (bpm);
+            info.setIsPlaying (playing);
+            info.setPpqPosition (ppq);
+            return info;
+        }
+    };
+
     void setParam (NeuroMPCProcessor& p, const char* id, float value)
     {
         auto* param = p.apvts.getParameter (id);
@@ -757,6 +773,167 @@ int main()
         const auto& cond = restored.getSeqPattern (0).lanes[2].steps[8];
         CHECK (cond.condition == neuro::SeqCondition::ratio && cond.condA == 1 && cond.condB == 2);
         CHECK ((int) restored.apvts.getRawParameterValue (ParamIDs::weaveFill)->load() == 2);
+    }
+
+    // ---- Phase 14: parameter IDs, state versions, robustness, relink, presets, host sync ----
+    {
+        // Frozen automation IDs: renaming or removing any of these breaks saved automation in user projects.
+        const juce::StringArray frozen { "gain", "attack", "release", "playMode", "transpose", "fineTune", "bendRange", "lfoDepth",
+            "lfoRate", "lfoShape", "lfoSync", "lfoPhase", "keyMode", "scale", "scaleRoot", "arpOn", "arpLatch", "arpDirection", "arpRate",
+            "arpGate", "arpOctaves", "arpSwing", "arpProbability", "arpRepeats", "arpVelocity", "arpRetrigger", "arpSeed", "arpAccent",
+            "arpPhrase", "arpVariation", "arpVaryPitch", "arpVaryVelocity", "arpVaryRhythm", "arpReturn", "arpHumanTime",
+            "arpHumanVelocity", "seqMode", "seqPattern", "seqRate", "seqSwing", "seqFill", "weaveAccent", "weaveAccentAmount",
+            "weaveFill", "weaveFillEvery", "weavePitch" };
+        NeuroMPCProcessor a;
+        juce::StringArray ids;
+        for (auto* param : a.getParameters())
+            if (auto* withId = dynamic_cast<juce::AudioProcessorParameterWithID*> (param))
+                ids.add (withId->paramID);
+        std::printf ("  %d host parameters\n", ids.size());
+        CHECK (ids.size() == frozen.size());
+        for (const auto& id : frozen)
+            CHECK (ids.contains (id));
+        auto unique = ids;
+        unique.removeDuplicates (false);
+        CHECK (unique.size() == ids.size());
+
+        // Every parameter survives a state round trip at a non-default value.
+        for (auto* param : a.getParameters())
+            param->setValueNotifyingHost (0.37f);
+        juce::MemoryBlock st;
+        a.getStateInformation (st);
+        NeuroMPCProcessor b;
+        b.setStateInformation (st.getData(), (int) st.getSize());
+        for (int i = 0; i < a.getParameters().size(); ++i)
+        {
+            // Compare meaning, not raw floats: e.g. a bool holding a host's raw 0.37 is "off" and saves as off.
+            const auto before = a.getParameters()[i]->getCurrentValueAsText(), after = b.getParameters()[i]->getCurrentValueAsText();
+            if (before != after)
+                std::printf ("    param %s: %s vs %s\n", ids[i].toRawUTF8(), before.toRawUTF8(), after.toRawUTF8());
+            CHECK (before == after);
+        }
+
+        // Version 1 state (Milestone 1 format) loads; a newer version loads best-effort and is flagged.
+        writeTestWav (wavFile);
+        auto v1 = juce::ValueTree::fromXml ("<NEURO_MPC version=\"1\"><PARAMS><PARAM id=\"gain\" value=\"-6.0\"/></PARAMS>"
+                                            "<SAMPLE path=\"" + wavFile.getFullPathName() + "\"/><SLICES>"
+                                            "<SLICE id=\"1\" start=\"0\" end=\"20000\"/><SLICE id=\"2\" start=\"20000\" end=\"48000\"/></SLICES></NEURO_MPC>");
+        NeuroMPCProcessor c;
+        CHECK (c.applyStateTree (v1) && c.getSlices().size() == 2 && ! c.wasLoadedFromNewerVersion());
+        CHECK (std::abs (c.apvts.getRawParameterValue (ParamIDs::gain)->load() + 6.0f) < 0.01f);
+        CHECK ((int) c.createStateTree().getProperty ("version") == NeuroMPCProcessor::stateVersion);
+        v1.setProperty ("version", 99, nullptr);
+        v1.appendChild (juce::ValueTree ("SOMETHING_FROM_THE_FUTURE"), nullptr);
+        NeuroMPCProcessor future;
+        CHECK (future.applyStateTree (v1) && future.wasLoadedFromNewerVersion() && future.getSlices().size() == 2);
+
+        // Corrupt input never crashes and never changes the current state.
+        juce::Random rng (42);
+        for (int trial = 0; trial < 200; ++trial)
+        {
+            juce::MemoryBlock junk ((size_t) rng.nextInt (2000));
+            rng.fillBitsRandomly (junk.getData(), junk.getSize());
+            c.setStateInformation (junk.getData(), (int) junk.getSize());
+        }
+        auto truncated = st;
+        truncated.setSize (st.getSize() / 2);
+        c.setStateInformation (truncated.getData(), (int) truncated.getSize());
+        c.setStateInformation (nullptr, 0);
+        CHECK (! c.applyStateTree (juce::ValueTree ("NOT_OURS")));
+        CHECK (c.getSlices().size() == 2 && c.getSample() != nullptr);
+
+        // Missing sample: slices are kept through a save while missing and restored on relink (and by folder search).
+        c.editSlices ([] (auto& s) { s.split (30000); });
+        c.getStateInformation (st);
+        const auto moved = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("neuro_relink");
+        moved.deleteRecursively();
+        moved.getChildFile ("deep/er").createDirectory();
+        const auto relocated = moved.getChildFile ("deep/er").getChildFile (wavFile.getFileName());
+        CHECK (wavFile.moveFileTo (relocated));
+        NeuroMPCProcessor m;
+        m.setStateInformation (st.getData(), (int) st.getSize());
+        CHECK (m.getSample() == nullptr && m.getMissingSamplePath() == wavFile.getFullPathName());
+        juce::MemoryBlock whileMissing;
+        m.getStateInformation (whileMissing);
+        NeuroMPCProcessor m2;
+        m2.setStateInformation (whileMissing.getData(), (int) whileMissing.getSize());
+        const auto found = m2.findMissingSampleIn (moved);
+        CHECK (found == relocated);
+        CHECK (m2.relinkSample (found, error) && m2.getSlices().size() == 3 && m2.getMissingSamplePath().isEmpty());
+        CHECK (m2.getSlices().getSlices()[2].startSample == 30000);
+        CHECK (relocated.moveFileTo (wavFile));
+        moved.deleteRecursively();
+
+        // Presets: save, list, load (state including slices and parameters).
+        const auto presetDir = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("neuro_presets");
+        presetDir.deleteRecursively();
+        NeuroMPCProcessor pr;
+        pr.setPresetDirectory (presetDir);
+        CHECK (pr.loadSample (wavFile, error));
+        pr.editSlices ([] (auto& s) { s.grid (8); });
+        setParam (pr, ParamIDs::arpRate, 2.0f);
+        CHECK (pr.savePreset ("My Kit / v1") && pr.getPresets().size() == 1);
+        pr.editSlices ([] (auto& s) { s.grid (2); });
+        setParam (pr, ParamIDs::arpRate, 6.0f);
+        CHECK (pr.loadPreset (pr.getPresets()[0]) && pr.getSlices().size() == 8);
+        CHECK ((int) pr.apvts.getRawParameterValue (ParamIDs::arpRate)->load() == 2 && pr.getCurrentPresetName().isNotEmpty());
+        CHECK (! pr.loadPreset (presetDir.getChildFile ("missing.neurompc")));
+        presetDir.deleteRecursively();
+
+        // Host sync: the sequencer follows host PPQ, tempo changes and loops, and stops cleanly with the transport.
+        NeuroMPCProcessor hs;
+        MockPlayHead host;
+        hs.setPlayHead (&host);
+        hs.prepareToPlay (rate, block);
+        CHECK (hs.loadSample (wavFile, error));
+        hs.editSlices ([] (auto& s) { s.grid (4); });
+        setParam (hs, ParamIDs::attack, 0.0f);
+        setParam (hs, ParamIDs::release, 1.0f);
+        setParam (hs, ParamIDs::playMode, 1.0f);
+        setParam (hs, ParamIDs::seqMode, 1.0f); // host transport
+        hs.editSeqPattern (0, [] (auto& pat) { for (int i = 0; i < 16; i += 4) pat.lanes[0].steps[(size_t) i] = { true, 1.0f }; });
+
+        auto hostRun = [&] (int blocks, double loopEnd = 0.0)
+        {
+            std::vector<float> out;
+            juce::AudioBuffer<float> buf (2, block);
+            for (int blk = 0; blk < blocks; ++blk)
+            {
+                juce::MidiBuffer midi;
+                hs.processBlock (buf, midi);
+                out.insert (out.end(), buf.getReadPointer (0), buf.getReadPointer (0) + block);
+                host.ppq += block * host.bpm / 60.0 / rate;
+                if (loopEnd > 0.0 && host.ppq >= loopEnd)
+                    host.ppq -= loopEnd; // loop back to the start
+            }
+            return out;
+        };
+        auto onsets = [] (const std::vector<float>& y)
+        {
+            std::vector<int> v;
+            for (size_t i = 0; i < y.size(); ++i) if (y[i] != 0.0f && (i == 0 || y[i - 1] == 0.0f)) v.push_back ((int) i);
+            return v;
+        };
+
+        CHECK (onsets (hostRun (100)).empty()); // host stopped: silent
+        host.playing = true;
+        host.ppq = 0.0;
+        auto on = onsets (hostRun (200));
+        CHECK (on.size() >= 4 && on[0] == 0 && on[1] == 24000 && on[2] == 48000); // quarter notes at 120 BPM
+        host.ppq = 0.0;
+        host.bpm = 60.0;
+        on = onsets (hostRun (200));
+        CHECK (on.size() >= 2 && on[0] == 0 && on[1] == 48000);                   // 60 BPM: twice as far apart
+        host.bpm = 120.0;
+        host.ppq = 0.0;
+        on = onsets (hostRun (400, 2.0));                                          // 2-beat host loop
+        std::printf ("  host loop onsets: %zu (first %d %d %d)\n", on.size(), on.size() > 0 ? on[0] : -1, on.size() > 1 ? on[1] : -1,
+                     on.size() > 2 ? on[2] : -1);
+        CHECK (on.size() >= 8);
+        host.playing = false;
+        auto tail = hostRun (20);
+        CHECK (std::all_of (tail.begin() + block * 2, tail.end(), [] (float v) { return v == 0.0f; })); // stop: no stuck notes
+        hs.setPlayHead (nullptr);
     }
 
     // Missing file on restore is reported, not substituted.

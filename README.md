@@ -3,7 +3,7 @@
 An open-source, MPC-style slice sampler for macOS: VST3 (Ableton Live), AU (Logic Pro), and Standalone.
 C++20 · JUCE 9.0.4 (pinned) · CMake. The master spec lives in `../gmni sampler/`.
 
-## Status: Milestones 1–3 (Phases 1–13: sampler, slicing, time-stretch, pitch analysis, chromatic pitch, pads, arpeggiator + generative, step sequencer + advanced sequencing)
+## Status: Milestones 1–3 + Phase 14 (Phases 1–14: sampler, slicing, time-stretch, pitch analysis, chromatic pitch, pads, arpeggiator + generative, step sequencer + advanced sequencing, state/automation hardening)
 
 | Works and is tested | |
 |---|---|
@@ -12,7 +12,7 @@ C++20 · JUCE 9.0.4 (pinned) · CMake. The master spec lives in `../gmni sampler
 | Slicing | Double-click to split, drag a marker to move, right-click a marker to remove; Auto-Slice (transients, sensitivity slider); Grid 4–64; Clear |
 | Playback | 32-voice polyphony with oldest-voice stealing; slice *n* = MIDI note 36+*n*−1 (C1 = pad 1); velocity; One-Shot / Gate; attack/release; smoothed gain; sample-rate conversion |
 | Pads | 64 pads in banks A–D; slice-by-id assignment (follow slices or custom), MIDI note + learn, layering, choke groups, level/tune/velocity sensitivity, names and colours, copy/paste/duplicate. See [Documentation/PADS.md](Documentation/PADS.md) |
-| State | Parameters, sample path, slices (stable ids) saved in the DAW project; a missing file is reported, never substituted |
+| State & presets | 46 frozen automation IDs; versioned state (v1 migrates; corrupt data is rejected safely); missing samples keep their slices and can be relinked by file or folder search; presets in ~/Library/Audio/Presets. See [Documentation/STATE_AND_AUTOMATION.md](Documentation/STATE_AND_AUTOMATION.md) |
 | Time-stretch | Per-slice ratio ×0.25–×4 with pitch preserved (Signalsmith Stretch), target duration, ×0.5/×2/1:1, Apply to all, per-slice Preserve transients, background rendering + LRU cache. See [Documentation/TIME_STRETCHING.md](Documentation/TIME_STRETCHING.md) |
 | Pitch & key | YIN pitch per slice and per sample with confidence, a polyphony check, and pitched/uncertain/unpitched status; chroma + Krumhansl–Kessler key that reports uncertainty honestly; per-slice manual Root correction. See [Documentation/PITCH_ANALYSIS.md](Documentation/PITCH_ANALYSIS.md) |
 | Chromatic pitch | Per-slice ±24 st (12-note selector, octave, fine), Resample or Keep-length mode; global transpose, fine tune, pitch bend (range 0–24), pitch LFO (5 shapes, phase, host-tempo sync); Keys mode plays a slice chromatically from its detected or manual root, with scale snapping. See [Documentation/PITCH_SHIFTING.md](Documentation/PITCH_SHIFTING.md) |

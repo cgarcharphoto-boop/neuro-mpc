@@ -84,8 +84,26 @@ public:
     const juce::String getProgramName (int) override    { return {}; }
     void changeProgramName (int, const juce::String&) override {}
 
+    // State may be requested from a non-message thread by some hosts: the editable model is guarded by modelLock.
     void getStateInformation (juce::MemoryBlock&) override;
     void setStateInformation (const void*, int) override;
+
+    static constexpr int stateVersion = 2;
+    juce::ValueTree createStateTree() const;
+    bool applyStateTree (juce::ValueTree);         // false if the tree is not a NEURO MPC state
+    bool wasLoadedFromNewerVersion() const noexcept { return loadedNewerVersion; }
+
+    // Missing samples: the saved slice layout is kept until the file is relinked.
+    bool relinkSample (const juce::File&, juce::String& error);
+    juce::File findMissingSampleIn (const juce::File& folder) const; // recursive search by file name
+
+    // Presets: state files (*.neurompc) in the user preset folder.
+    juce::File getPresetDirectory() const;
+    void setPresetDirectory (const juce::File& dir)  { presetDirectory = dir; }
+    juce::Array<juce::File> getPresets() const;
+    bool savePreset (const juce::String& name);
+    bool loadPreset (const juce::File&);
+    juce::String getCurrentPresetName() const        { return currentPresetName; }
 
     // ---- Message-thread API ----
     bool loadSample (const juce::File&, juce::String& error);
@@ -152,6 +170,8 @@ public:
 private:
     static juce::AudioProcessorValueTreeState::ParameterLayout createLayout();
     void publishSlices();
+    void restoreSlicesFrom (const juce::ValueTree& sliceTree);
+    static void migrate (juce::ValueTree& root);
     void publishPads();
     void pushUiNote (int note, float velocity, int slice);
     void refreshStretch();
@@ -239,6 +259,12 @@ private:
     neuro::RtShared<neuro::PadMap> rtPads;
     std::atomic<int> lastMidiNote { -1 }, midiNoteCount { 0 };
     static constexpr int sliceAuditionTag = 1000; // note tags above the MIDI range
+
+    mutable std::recursive_mutex modelLock;
+    juce::ValueTree pendingSliceTree; // slices of a missing sample, applied on relink
+    bool loadedNewerVersion = false;
+    juce::File presetDirectory;
+    juce::String currentPresetName;
 
     int keyboardSlice = 0; // message thread
     std::atomic<int> keyboardSliceIndex { 0 };
