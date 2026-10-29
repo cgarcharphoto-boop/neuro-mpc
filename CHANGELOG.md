@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.0 (2026-10-29): MIDI mapping
+- **MIDI Learn for every control:** 182 buttons, sliders and selectors, enforced by a test. Mapped messages are consumed. Parameter mappings run on the audio thread (and work with the editor closed); other controls run on the message thread.
+- **Hardware pad banks:** "pads follow bank" plays NEURO pad *n* of the selected bank A–D, positionally. The bank selector is a mappable parameter (`padBank`), there is a learned hardware pad layout, and a pad MIDI channel filter (`padBankFollow`, `padChannel`).
+- **Akai MPK mini mk2 template**, measured from a connected unit (knobs CC 1–8, pads 32–39 / 44–51 on ch 1).
+- **Fixed:** closing the editor could crash the host (parameter attachments outlived their controls).
+- **Fixed:** editing the arpeggiator pattern reset the learned hardware pad layout and wrote audio-thread state from the message thread. A Phase 12 edit had duplicated constructor code into `editArpProgram`.
+- **Fixed:** the processor no longer stores ~0.5 MB of sequencer patterns inline.
+- **Fixed:** MIDI acting on controls in hidden tabs now uses current values.
+
 ## 0.1.0 (2026-10-29): first complete build of the specification (Phases 1–15)
 - **Sampler:** WAV/AIFF/FLAC/OGG/MP3 import; waveform with zoom; manual, transient and grid slicing with stable ids; 32-voice engine with one-shot/gate, envelopes, velocity and reverse support.
 - **Per-slice time-stretch:** ×0.25–×4 with pitch preserved (Signalsmith Stretch), transient preservation, background rendering, deterministic renders.

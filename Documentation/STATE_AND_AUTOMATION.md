@@ -1,6 +1,6 @@
 # State, Automation and Presets (Phase 14)
 
-## Host parameters (46, frozen)
+## Host parameters (49, frozen)
 Every automatable control is a JUCE `AudioProcessorValueTreeState` parameter with a **stable ID**, version hint 1. The full list is frozen in `neuro_engine_tests`, which fails if any ID is renamed, removed or duplicated, because that would break automation in saved projects. New parameters must be appended to that list.
 
 | Group | IDs |
@@ -11,8 +11,9 @@ Every automatable control is a JUCE `AudioProcessorValueTreeState` parameter wit
 | Generative arp | arpAccent, arpPhrase, arpVariation, arpVaryPitch, arpVaryVelocity, arpVaryRhythm, arpReturn, arpHumanTime, arpHumanVelocity |
 | Sequencer | seqMode, seqPattern, seqRate, seqSwing, seqFill |
 | Weaving | weaveAccent, weaveAccentAmount, weaveFill, weaveFillEvery, weavePitch |
+| Pads / MIDI | padBank, padBankFollow, padChannel |
 
-Model data that isn't a single value is saved with the project, not as parameters: slices, pads, the arp rhythm and grammar, sequencer patterns, the keyboard slice and the sample reference.
+Model data that isn't a single value is saved with the project, not as parameters: slices, pads, the arp rhythm and grammar, sequencer patterns, the keyboard slice, the sample reference, MIDI mappings and the hardware pad layout.
 
 ## State format and versions
 `NEURO_MPC` XML (`createStateTree` / `applyStateTree`), currently **version 2**.

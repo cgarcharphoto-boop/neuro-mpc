@@ -160,7 +160,13 @@ NeuroMPCEditor::NeuroMPCEditor (NeuroMPCProcessor& p) : AudioProcessorEditor (p)
         button.setRadioGroupId (1);
         button.setClickingTogglesState (true);
         button.setColour (juce::TextButton::buttonOnColourId, accent);
-        button.onClick = [this, b] { currentBank = b; selectPad (b * neuro::padsPerBank + selectedPad % neuro::padsPerBank); };
+        button.onClick = [this, b]
+        {
+            auto* bankParam = proc.apvts.getParameter (ParamIDs::padBank);
+            bankParam->setValueNotifyingHost (bankParam->convertTo0to1 ((float) b)); // hardware pads follow (see processBlock)
+            currentBank = b;
+            selectPad (b * neuro::padsPerBank + selectedPad % neuro::padsPerBank);
+        };
         addAndMakeVisible (button);
     }
 
@@ -198,7 +204,7 @@ NeuroMPCEditor::NeuroMPCEditor (NeuroMPCProcessor& p) : AudioProcessorEditor (p)
             if (id >= 2 && id <= 10) { st.condA = ratios[id - 2][0]; st.condB = ratios[id - 2][1]; }
         });
     };
-    buttonAttachments.push_back (std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (proc.apvts, ParamIDs::seqFill, seqFill));
+    attachButton (seqFill, ParamIDs::seqFill);
     seqFill.setTooltip ("Fill: steps with fill / not-fill conditions follow this switch");
     seqUndo.onClick = [this] { proc.undoSeqPattern (proc.getSelectedSeqPattern()); updateSeqPanel(); };
     seqRedo.onClick = [this] { proc.redoSeqPattern (proc.getSelectedSeqPattern()); updateSeqPanel(); };
@@ -327,10 +333,10 @@ NeuroMPCEditor::NeuroMPCEditor (NeuroMPCProcessor& p) : AudioProcessorEditor (p)
 
     for (auto [box, id] : std::initializer_list<std::pair<juce::ComboBox*, const char*>> {
              { &weaveAccent, ParamIDs::weaveAccent }, { &weaveFill, ParamIDs::weaveFill }, { &weavePitch, ParamIDs::weavePitch } })
-        comboAttachments.push_back (std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment> (proc.apvts, id, *box));
+        attachCombo (*box, id);
 
-    sliderAttachments.push_back (std::make_unique<SliderAttachment> (proc.apvts, ParamIDs::weaveAccentAmount, weaveAmount));
-    sliderAttachments.push_back (std::make_unique<SliderAttachment> (proc.apvts, ParamIDs::weaveFillEvery, weaveEvery));
+    attachSlider (weaveAmount, ParamIDs::weaveAccentAmount);
+    attachSlider (weaveEvery, ParamIDs::weaveFillEvery);
 
     for (auto [slider, name] : std::initializer_list<std::pair<juce::Slider*, const char*>> {
              { &curveDepth, "Depth" }, { &offbeatChance, "Offbeat" }, { &mutIntensity, "Intensity" }, { &mutPreserve, "Preserve" },
@@ -359,9 +365,9 @@ NeuroMPCEditor::NeuroMPCEditor (NeuroMPCProcessor& p) : AudioProcessorEditor (p)
 
     for (auto [box, id] : std::initializer_list<std::pair<juce::ComboBox*, const char*>> {
              { &seqPatternBox, ParamIDs::seqPattern }, { &seqModeBox, ParamIDs::seqMode }, { &seqRateBox, ParamIDs::seqRate } })
-        comboAttachments.push_back (std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment> (proc.apvts, id, *box));
+        attachCombo (*box, id);
 
-    sliderAttachments.push_back (std::make_unique<SliderAttachment> (proc.apvts, ParamIDs::seqSwing, seqSwing));
+    attachSlider (seqSwing, ParamIDs::seqSwing);
     seqPatternBox.onChange = [this] { updateSeqPanel(); };
 
     seqName.setEditable (true);
@@ -506,11 +512,11 @@ NeuroMPCEditor::NeuroMPCEditor (NeuroMPCProcessor& p) : AudioProcessorEditor (p)
     for (auto [slider, id] : std::initializer_list<std::pair<juce::Slider*, const char*>> {
              { &arpPhrase, ParamIDs::arpPhrase }, { &arpVariation, ParamIDs::arpVariation }, { &arpReturn, ParamIDs::arpReturn },
              { &arpAccent, ParamIDs::arpAccent }, { &arpHumanTime, ParamIDs::arpHumanTime }, { &arpHumanVel, ParamIDs::arpHumanVel } })
-        sliderAttachments.push_back (std::make_unique<SliderAttachment> (proc.apvts, id, *slider));
+        attachSlider (*slider, id);
 
     for (auto [button, id] : std::initializer_list<std::pair<juce::Button*, const char*>> {
              { &varyPitch, ParamIDs::arpVaryPitch }, { &varyVelocity, ParamIDs::arpVaryVel }, { &varyRhythm, ParamIDs::arpVaryRhythm } })
-        buttonAttachments.push_back (std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (proc.apvts, id, *button));
+        attachButton (*button, id);
 
     ruleWhen.addItemList ({ "Step N of every", "Steps from N of every", "Phrase end (last N)", "Chance (N %)" }, 1);
     ruleWhen.setSelectedId (1, juce::dontSendNotification);
@@ -588,10 +594,10 @@ NeuroMPCEditor::NeuroMPCEditor (NeuroMPCProcessor& p) : AudioProcessorEditor (p)
 
     for (auto [box, id] : std::initializer_list<std::pair<juce::ComboBox*, const char*>> {
              { &arpDirection, ParamIDs::arpDirection }, { &arpRate, ParamIDs::arpRate }, { &arpRetrigger, ParamIDs::arpRetrigger } })
-        comboAttachments.push_back (std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment> (proc.apvts, id, *box));
+        attachCombo (*box, id);
 
     for (auto [button, id] : std::initializer_list<std::pair<juce::Button*, const char*>> { { &arpOn, ParamIDs::arpOn }, { &arpLatch, ParamIDs::arpLatch } })
-        buttonAttachments.push_back (std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (proc.apvts, id, *button));
+        attachButton (*button, id);
 
     for (auto [slider, id, name] : std::initializer_list<std::tuple<juce::Slider*, const char*, const char*>> {
              { &arpGate, ParamIDs::arpGate, "Gate" }, { &arpSwing, ParamIDs::arpSwing, "Swing" }, { &arpChance, ParamIDs::arpChance, "Chance" },
@@ -599,7 +605,7 @@ NeuroMPCEditor::NeuroMPCEditor (NeuroMPCProcessor& p) : AudioProcessorEditor (p)
              { &arpVelocity, ParamIDs::arpVelocity, "Velocity" }, { &arpSeed, ParamIDs::arpSeed, "Seed" } })
     {
         slider->setTextBoxStyle (juce::Slider::TextBoxRight, false, 66, 20);
-        sliderAttachments.push_back (std::make_unique<SliderAttachment> (proc.apvts, id, *slider));
+        attachSlider (*slider, id);
         auto label = std::make_unique<juce::Label> (name, name);
         label->setFont (juce::FontOptions (11.0f));
         label->attachToComponent (slider, true);
@@ -710,7 +716,7 @@ NeuroMPCEditor::NeuroMPCEditor (NeuroMPCProcessor& p) : AudioProcessorEditor (p)
              { &lfoRate, ParamIDs::lfoRate, "LFO Rate" }, { &lfoPhase, ParamIDs::lfoPhase, "LFO Phase" } })
     {
         knobLabels.push_back (setupKnob (*knob, *this, name));
-        sliderAttachments.push_back (std::make_unique<SliderAttachment> (proc.apvts, id, *knob));
+        attachSlider (*knob, id);
     }
 
     keyMode.addItemList ({ "Pads", "Keys" }, 1);
@@ -729,7 +735,7 @@ NeuroMPCEditor::NeuroMPCEditor (NeuroMPCProcessor& p) : AudioProcessorEditor (p)
     for (auto [box, id] : std::initializer_list<std::pair<juce::ComboBox*, const char*>> {
              { &playMode, ParamIDs::playMode }, { &keyMode, ParamIDs::keyMode }, { &scale, ParamIDs::scale },
              { &scaleRoot, ParamIDs::scaleRoot }, { &lfoShape, ParamIDs::lfoShape }, { &lfoSync, ParamIDs::lfoSync } })
-        comboAttachments.push_back (std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment> (proc.apvts, id, *box));
+        attachCombo (*box, id);
 
     // ---- Presets and relinking ----
     presetBox.setTextWhenNothingSelected ("Presets");
@@ -860,6 +866,22 @@ NeuroMPCEditor::NeuroMPCEditor (NeuroMPCProcessor& p) : AudioProcessorEditor (p)
     info.setColour (juce::Label::textColourId, juce::Colours::white.withAlpha (0.7f));
     info.setJustificationType (juce::Justification::topLeft);
 
+    // ---- MIDI Learn ----
+    for (auto* c : { &midiLearnButton, &midiMenuButton })
+    {
+        c->setComponentID ("nomap"); // the learn controls themselves are not mappable
+        addAndMakeVisible (c);
+    }
+
+    midiLearnButton.setClickingTogglesState (true);
+    midiLearnButton.setColour (juce::TextButton::buttonOnColourId, juce::Colours::green.darker (0.2f));
+    midiLearnButton.setTooltip ("MIDI Learn: click a control, then move a knob or hit a pad/key on your controller. Right-click removes a mapping");
+    midiLearnButton.onClick = [this] { setMidiLearnMode (midiLearnButton.getToggleState()); };
+    midiMenuButton.setTooltip ("MIDI options: controller templates, pad bank follow, pad channel, clear mappings");
+    midiMenuButton.onClick = [this] { showMidiMenu(); };
+    addChildComponent (learnOverlay);
+    registerMappables();
+
     showPanel (Panel::slice);
     setResizable (true, true);
     setResizeLimits (1040, 780, 2400, 1600);
@@ -870,6 +892,342 @@ NeuroMPCEditor::NeuroMPCEditor (NeuroMPCProcessor& p) : AudioProcessorEditor (p)
 NeuroMPCEditor::~NeuroMPCEditor()
 {
     stopTimer();
+    proc.stopMidiLearn();
+    proc.stopPadLayoutLearn();
+    proc.clearUiTargets();
+
+    // Attachments reference controls declared after them; destroy them first, or closing the editor would make them
+    // unregister from already-destroyed sliders/buttons/selectors.
+    sliderAttachments.clear();
+    comboAttachments.clear();
+    buttonAttachments.clear();
+    knobLabels.clear();
+}
+
+void NeuroMPCEditor::attachSlider (juce::Slider& s, const char* paramId)
+{
+    s.setComponentID (juce::String ("param:") + paramId);
+    sliderAttachments.push_back (std::make_unique<SliderAttachment> (proc.apvts, paramId, s));
+}
+
+void NeuroMPCEditor::attachCombo (juce::ComboBox& c, const char* paramId)
+{
+    c.setComponentID (juce::String ("param:") + paramId);
+    comboAttachments.push_back (std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment> (proc.apvts, paramId, c));
+}
+
+void NeuroMPCEditor::attachButton (juce::Button& b, const char* paramId)
+{
+    b.setComponentID (juce::String ("param:") + paramId);
+    buttonAttachments.push_back (std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (proc.apvts, paramId, b));
+}
+
+// Gives every control that is not a host parameter a stable "ui:" ID and registers them with the processor, so MIDI
+// mappings survive closing/reopening the editor and project reloads.
+void NeuroMPCEditor::registerMappables()
+{
+    auto id = [] (juce::Component& c, const juce::String& name) { c.setComponentID ("ui:" + name); };
+
+    for (auto [c, name] : std::initializer_list<std::pair<juce::Component*, const char*>> {
+             { &loadButton, "sample.load" }, { &autoButton, "slice.auto" }, { &sensitivity, "slice.sensitivity" },
+             { &gridDivisions, "slice.gridDivisions" }, { &gridButton, "slice.grid" }, { &clearButton, "slice.clear" },
+             { &presetBox, "preset.select" }, { &savePresetButton, "preset.save" }, { &relinkButton, "sample.relink" },
+             { &stretch, "slice.stretch" }, { &halfButton, "slice.stretchHalf" }, { &doubleButton, "slice.stretchDouble" },
+             { &resetButton, "slice.stretchReset" }, { &allButton, "slice.stretchAll" }, { &preserveTransients, "slice.preserveTransients" },
+             { &rootNote, "slice.root" }, { &octaveDown, "slice.octaveDown" }, { &octaveUp, "slice.octaveUp" },
+             { &fineCents, "slice.fine" }, { &pitchMode, "slice.pitchMode" },
+             { &sliceTab, "view.slice" }, { &padTab, "view.pad" }, { &arpTab, "view.arp" }, { &genTab, "view.gen" },
+             { &seqTab, "view.seq" }, { &evolveTab, "view.evolve" },
+             { &padSlice, "pad.slice" }, { &padNote, "pad.note" }, { &padChoke, "pad.choke" }, { &padGain, "pad.level" },
+             { &padPitch, "pad.tune" }, { &padVelocity, "pad.velocity" }, { &padLearn, "pad.learnNote" }, { &padColour, "pad.colour" },
+             { &padCopy, "pad.copy" }, { &padPaste, "pad.paste" }, { &padDuplicate, "pad.duplicate" }, { &padClear, "pad.clear" },
+             { &padAutoAssign, "pad.autoAssign" },
+             { &patternLength, "gen.length" }, { &euclidPulses, "gen.euclidPulses" }, { &euclidRotate, "gen.euclidRotate" },
+             { &euclidButton, "gen.euclid" }, { &allOnButton, "gen.allOn" }, { &ruleWhen, "gen.ruleWhen" }, { &ruleN, "gen.ruleN" },
+             { &ruleOffset, "gen.ruleStep" }, { &ruleAction, "gen.ruleAction" }, { &ruleAmount, "gen.ruleAmount" },
+             { &addRule, "gen.addRule" }, { &removeRule, "gen.removeRule" }, { &clearRules, "gen.clearRules" },
+             { &grammarPresets, "gen.grammarPreset" },
+             { &seqDuplicate, "seq.duplicate" }, { &seqClear, "seq.clear" }, { &lanePageButton, "seq.lanePage" },
+             { &seqUndo, "seq.undo" }, { &seqRedo, "seq.redo" }, { &stepCondition, "seq.stepCondition" }, { &laneNote, "seq.laneNote" },
+             { &stepVelocity, "seq.stepVelocity" }, { &stepGate, "seq.stepGate" }, { &stepChance, "seq.stepChance" },
+             { &stepRatchet, "seq.stepRatchet" }, { &stepMicro, "seq.stepMicro" }, { &stepPitch, "seq.stepPitch" },
+             { &laneLength, "seq.laneLength" },
+             { &evolveScope, "evolve.scope" }, { &velocityCurve, "evolve.velocityCurve" }, { &donorPattern, "evolve.donor" },
+             { &xReverse, "evolve.reverse" }, { &xLeft, "evolve.shiftLeft" }, { &xRight, "evolve.shiftRight" },
+             { &xDouble, "evolve.double" }, { &xHalve, "evolve.halve" }, { &xExpand, "evolve.expand" }, { &xContract, "evolve.contract" },
+             { &applyCurve, "evolve.applyCurve" }, { &applyProfile, "evolve.applyProfile" }, { &mutateButton, "evolve.mutate" },
+             { &compareButton, "evolve.compare" }, { &combineButton, "evolve.takeGenes" }, { &evolveUndo, "evolve.undo" },
+             { &evolveRedo, "evolve.redo" }, { &curveDepth, "evolve.curveDepth" }, { &offbeatChance, "evolve.offbeatChance" },
+             { &mutIntensity, "evolve.intensity" }, { &mutPreserve, "evolve.preserve" }, { &mutDensity, "evolve.density" },
+             { &mutPitch, "evolve.pitchRange" }, { &mutVelocity, "evolve.velocityRange" }, { &mutTiming, "evolve.timingRange" },
+             { &mutSeed, "evolve.seed" } })
+        id (*c, name);
+
+    for (int pc = 0; pc < 12; ++pc)
+        id (noteButtons[(size_t) pc], juce::String ("slice.note") + neuro::pitchClassName (pc));
+
+    for (int i = 0; i < neuro::ArpProgram::maxSteps; ++i)
+        id (stepButtons[(size_t) i], "gen.step" + juce::String (i + 1));
+
+    for (int i = 0; i < 4; ++i)
+        id (stepPageButtons[(size_t) i], "seq.page" + juce::String (i + 1));
+
+    for (size_t g = 0; g < geneToggles.size(); ++g)
+        id (geneToggles[g], "evolve.gene." + geneToggles[g].getButtonText().toLowerCase());
+
+    // Bank buttons select a pad bank directly (works with the editor closed): param:padBank@n.
+    for (int b = 0; b < neuro::numBanks; ++b)
+        bankButtons[(size_t) b].setComponentID (juce::String ("param:") + ParamIDs::padBank + "@" + juce::String (b));
+
+    std::vector<std::string> ids;
+    uiControls.clear();
+
+    for (auto* c : getMappableControls())
+        if (c->getComponentID().startsWith ("ui:"))
+        {
+            uiControls.push_back (c);
+            ids.push_back (c->getComponentID().toStdString());
+        }
+
+    lastMappedValue.assign (uiControls.size(), 0.0f);
+    proc.setUiTargets (std::move (ids), [this] (int index, float value) { runMappedAction (index, value); });
+}
+
+std::vector<juce::Component*> NeuroMPCEditor::getMappableControls() const
+{
+    std::vector<juce::Component*> result;
+    std::function<void (const juce::Component&)> walk = [&] (const juce::Component& parent)
+    {
+        for (auto* child : parent.getChildren())
+        {
+            const auto cid = child->getComponentID();
+
+            if (cid.startsWith ("param:") || cid.startsWith ("ui:"))
+                result.push_back (child);
+            else
+                walk (*child);
+        }
+    };
+
+    walk (*this);
+    return result;
+}
+
+int NeuroMPCEditor::countUnmappableControls() const
+{
+    int missing = 0;
+    std::function<void (const juce::Component&)> walk = [&] (const juce::Component& parent)
+    {
+        for (auto* child : parent.getChildren())
+        {
+            const auto cid = child->getComponentID();
+            const auto isControl = dynamic_cast<juce::Button*> (child) != nullptr || dynamic_cast<juce::Slider*> (child) != nullptr
+                                   || dynamic_cast<juce::ComboBox*> (child) != nullptr;
+
+            if (cid.startsWith ("param:") || cid.startsWith ("ui:") || cid == "nomap")
+                continue; // mapped controls (their internal parts are part of the control)
+
+            if (isControl)
+            {
+                DBG ("Unmappable control: " << child->getName() << " " << typeid (*child).name());
+                ++missing;
+            }
+
+            walk (*child);
+        }
+    };
+
+    walk (*this);
+    return missing;
+}
+
+// Runs a mapped "ui:" control from MIDI (message thread). Buttons fire on a note or a CC rising past 64;
+// sliders follow the CC (respecting their skew); selectors pick by CC position or step to the next item on a note.
+void NeuroMPCEditor::runMappedAction (int index, float value)
+{
+    if (! juce::isPositiveAndBelow (index, (int) uiControls.size()))
+        return;
+
+    // MIDI can reach controls on hidden tabs: sync every panel with the model first, so a control acts from its
+    // true current value (a stale hidden slider would otherwise ignore a CC that matches its stale position).
+    updateSlicePanel();
+    updatePadPanel();
+    updateGenPanel();
+    updateSeqPanel();
+    updateEvolvePanel();
+
+    auto* c = uiControls[(size_t) index];
+    const auto previous = std::exchange (lastMappedValue[(size_t) index], value);
+
+    if (! c->isEnabled())
+        return;
+
+    if (auto* b = dynamic_cast<juce::Button*> (c))
+    {
+        if (value >= 0.0f && ! (value >= 0.5f && previous < 0.5f))
+            return;
+
+        if (b->getClickingTogglesState())
+        {
+            const auto shouldBeOn = b->getRadioGroupId() != 0 || ! b->getToggleState();
+
+            if (shouldBeOn != b->getToggleState())
+                b->setToggleState (shouldBeOn, juce::sendNotificationSync);
+            else if (b->onClick)
+                b->onClick();
+        }
+        else if (b->onClick)
+        {
+            b->onClick();
+        }
+    }
+    else if (auto* s = dynamic_cast<juce::Slider*> (c))
+    {
+        if (value >= 0.0f)
+            s->setValue (s->proportionOfLengthToValue (value), juce::sendNotificationSync);
+    }
+    else if (auto* box = dynamic_cast<juce::ComboBox*> (c))
+    {
+        const auto n = box->getNumItems();
+
+        if (n > 0)
+            box->setSelectedItemIndex (value < 0.0f ? (box->getSelectedItemIndex() + 1) % n : juce::roundToInt (value * (float) (n - 1)),
+                                       juce::sendNotificationSync);
+    }
+}
+
+void NeuroMPCEditor::setMidiLearnMode (bool on)
+{
+    midiLearnButton.setToggleState (on, juce::dontSendNotification);
+    learnOverlay.setVisible (on);
+    learnOverlay.toFront (false);
+
+    if (! on)
+        proc.stopMidiLearn();
+}
+
+void NeuroMPCEditor::showMidiMenu()
+{
+    auto* follow = proc.apvts.getParameter (ParamIDs::padBankFollow);
+    auto* channel = proc.apvts.getParameter (ParamIDs::padChannel);
+    juce::PopupMenu channels;
+
+    for (int c = 0; c <= 16; ++c)
+        channels.addItem (100 + c, c == 0 ? juce::String ("Any channel") : "Channel " + juce::String (c), true,
+                          juce::roundToInt (channel->convertFrom0to1 (channel->getValue())) == c);
+
+    juce::PopupMenu menu;
+    menu.addItem (1, "MIDI Learn mode", true, midiLearnButton.getToggleState());
+    menu.addSeparator();
+    menu.addItem (2, "Akai MPK mini mk2 template (measured: knobs CC 1-8, pads on ch 1)");
+    menu.addItem (5, proc.getPadLayoutLearnProgress() >= 0 ? "Stop learning hardware pad layout" : "Learn hardware pad layout (hit your 16 pads in NEURO pad order)");
+    menu.addItem (3, "Hardware pads follow the selected bank", true, follow->getValue() >= 0.5f);
+    menu.addSubMenu ("Pad MIDI channel", channels);
+    menu.addSeparator();
+    menu.addItem (4, "Clear all MIDI mappings", ! proc.getMidiMap().getBindings().empty());
+
+    menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (midiMenuButton), [this, follow, channel] (int result)
+    {
+        if (result == 1)      setMidiLearnMode (! midiLearnButton.getToggleState());
+        else if (result == 2) proc.applyMpkMiniMk2Template();
+        else if (result == 5)
+        {
+            if (proc.getPadLayoutLearnProgress() >= 0)
+                proc.stopPadLayoutLearn();
+            else
+            {
+                proc.startPadLayoutLearn();
+                setMidiLearnMode (true);
+            }
+        }
+        else if (result == 3) follow->setValueNotifyingHost (follow->getValue() >= 0.5f ? 0.0f : 1.0f);
+        else if (result == 4) proc.editMidiMap ([] (auto& map) { map.clear(); });
+        else if (result >= 100) channel->setValueNotifyingHost (channel->convertTo0to1 ((float) (result - 100)));
+
+        learnOverlay.repaint();
+    });
+}
+
+juce::Component* NeuroMPCEditor::LearnOverlay::controlAt (juce::Point<int> p) const
+{
+    juce::Component* best = nullptr;
+
+    for (auto* c : editor.getMappableControls())
+    {
+        if (! c->isShowing())
+            continue;
+
+        const auto area = getLocalArea (c, c->getLocalBounds());
+
+        if (area.contains (p) && (best == nullptr || area.getWidth() * area.getHeight() < best->getWidth() * best->getHeight()))
+            best = c;
+    }
+
+    return best;
+}
+
+void NeuroMPCEditor::LearnOverlay::paint (juce::Graphics& g)
+{
+    g.fillAll (juce::Colours::black.withAlpha (0.25f));
+    const auto target = editor.proc.getMidiLearnTarget();
+    g.setFont (10.0f);
+
+    for (auto* c : editor.getMappableControls())
+    {
+        if (! c->isShowing())
+            continue;
+
+        const auto area = getLocalArea (c, c->getLocalBounds()).toFloat().reduced (1.0f);
+        const auto mapped = editor.proc.describeMidiBindings (c->getComponentID());
+        const auto learning = c->getComponentID() == target;
+        g.setColour (learning ? juce::Colour (0xffff8a3d) : mapped.isNotEmpty() ? juce::Colours::limegreen : juce::Colours::white.withAlpha (0.35f));
+        g.drawRoundedRectangle (area, 3.0f, learning ? 2.5f : 1.2f);
+
+        if (mapped.isNotEmpty())
+            g.drawText (mapped.upToFirstOccurrenceOf (",", false, false), area.toNearestInt(), juce::Justification::bottomRight);
+    }
+
+    const auto banner = getLocalBounds().removeFromBottom (24);
+    g.setColour (juce::Colours::black.withAlpha (0.8f));
+    g.fillRect (banner);
+    g.setColour (juce::Colours::white);
+    g.setFont (13.0f);
+    const auto layout = editor.proc.getPadLayoutLearnProgress();
+    g.drawText (layout >= 0 ? "Learning hardware pads: hit hardware pad " + juce::String (layout + 1)
+                                  + " of 16 (NEURO order: bottom-left = 1, left to right, bottom row first; switch the controller's pad bank for 9-16)"
+              : target.isNotEmpty() ? "Now move a knob or hit a pad/key on your controller to map " + target.fromFirstOccurrenceOf (":", false, false)
+                                    : juce::String ("MIDI Learn: click a control to map it (right-click removes its mapping). Click MIDI Learn again to finish."),
+                banner, juce::Justification::centred);
+}
+
+void NeuroMPCEditor::LearnOverlay::mouseDown (const juce::MouseEvent& e)
+{
+    if (editor.midiLearnButton.getBounds().contains (e.getPosition()))
+    {
+        editor.proc.stopPadLayoutLearn();
+        editor.setMidiLearnMode (false);
+        return;
+    }
+
+    if (editor.proc.getPadLayoutLearnProgress() >= 0)
+        return; // hitting hardware pads, not clicking controls
+
+    if (auto* c = controlAt (e.getPosition()))
+    {
+        const auto cid = c->getComponentID();
+
+        if (e.mods.isPopupMenu())
+        {
+            editor.proc.editMidiMap ([&] (auto& map) { map.removeTarget (cid.toStdString()); });
+            editor.proc.stopMidiLearn();
+        }
+        else
+        {
+            editor.proc.startMidiLearn (cid);
+        }
+    }
+
+    repaint();
 }
 
 void NeuroMPCEditor::load (const juce::File& file)
@@ -1303,6 +1661,21 @@ void NeuroMPCEditor::timerCallback()
 
     relinkButton.setVisible (proc.getMissingSamplePath().isNotEmpty());
 
+    // Pad bank can change from MIDI/automation: follow the parameter.
+    if (const auto bank = juce::jlimit (0, neuro::numBanks - 1, (int) proc.apvts.getRawParameterValue (ParamIDs::padBank)->load());
+        bank != currentBank)
+    {
+        currentBank = bank;
+        bankButtons[(size_t) bank].setToggleState (true, juce::dontSendNotification);
+        selectPad (bank * neuro::padsPerBank + selectedPad % neuro::padsPerBank);
+    }
+
+    if (learnOverlay.isVisible())
+        learnOverlay.repaint();
+
+    if (learnOverlay.isVisible() && proc.getPadLayoutLearnProgress() < 0 && ! midiLearnButton.getToggleState())
+        setMidiLearnMode (false);
+
     // MIDI learn: the first note-on after Learn was pressed becomes the pad's note.
     if (learnBaseline >= 0 && proc.getMidiNoteCount() != learnBaseline)
     {
@@ -1342,6 +1715,8 @@ void NeuroMPCEditor::paint (juce::Graphics& g)
 
 void NeuroMPCEditor::resized()
 {
+    learnOverlay.setBounds (getLocalBounds());
+
     auto area = getLocalBounds().reduced (10);
     auto top = area.removeFromTop (34);
 
@@ -1368,6 +1743,10 @@ void NeuroMPCEditor::resized()
     savePresetButton.setBounds (top.removeFromLeft (48));
     top.removeFromLeft (6);
     relinkButton.setBounds (top.removeFromLeft (76));
+    top.removeFromLeft (12);
+    midiLearnButton.setBounds (top.removeFromLeft (84));
+    top.removeFromLeft (4);
+    midiMenuButton.setBounds (top.removeFromLeft (48));
 
     area.removeFromTop (8);
     auto bottom = area.removeFromBottom (juce::jmin (460, area.getHeight() * 3 / 5));

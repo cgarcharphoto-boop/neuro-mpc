@@ -19,6 +19,11 @@ public:
     bool isInterestedInFileDrag (const juce::StringArray&) override { return true; }
     void filesDropped (const juce::StringArray&, int, int) override;
 
+    // MIDI mapping: every button, slider and selector carries a component ID "param:<id>" or "ui:<id>".
+    std::vector<juce::Component*> getMappableControls() const;
+    int countUnmappableControls() const;          // buttons/sliders/selectors without a mapping ID (should be 0)
+    void runMappedAction (int uiIndex, float value); // value 0..1 = CC, -1 = note trigger
+
 private:
     // MPC-style pad (one of 16 visible; the bank selects which 16 of the 64). Velocity from the vertical click position
     // (top = loudest); lit while its slice plays; click selects it for editing.
@@ -37,6 +42,22 @@ private:
     };
 
     void timerCallback() override;
+    void attachSlider (juce::Slider&, const char* paramId);
+    void attachCombo (juce::ComboBox&, const char* paramId);
+    void attachButton (juce::Button&, const char* paramId);
+    void registerMappables();
+    void setMidiLearnMode (bool);
+    void showMidiMenu();
+
+    // Shown in MIDI Learn mode: outlines mappable controls; click one, then move/press a control on the MIDI device.
+    struct LearnOverlay : public juce::Component
+    {
+        explicit LearnOverlay (NeuroMPCEditor& e) : editor (e) {}
+        void paint (juce::Graphics&) override;
+        void mouseDown (const juce::MouseEvent&) override;
+        juce::Component* controlAt (juce::Point<int>) const;
+        NeuroMPCEditor& editor;
+    };
     void load (const juce::File&);
     void updateInfo();
     void updateSlicePanel();
@@ -66,7 +87,9 @@ private:
     NeuroMPCProcessor& proc;
     WaveformView waveform { proc };
     juce::TextButton loadButton { "Load" }, autoButton { "Auto-Slice" }, gridButton { "Grid" }, clearButton { "Clear" },
-                     savePresetButton { "Save" }, relinkButton { "Relink..." };
+                     savePresetButton { "Save" }, relinkButton { "Relink..." }, midiLearnButton { "MIDI Learn" }, midiMenuButton { "MIDI" };
+    std::vector<juce::Component*> uiControls; // "ui:" controls, in the order registered with the processor
+    std::vector<float> lastMappedValue;
     juce::ComboBox presetBox;
     juce::Rectangle<int> titleArea;
     juce::Array<juce::File> presetFiles;
@@ -174,6 +197,7 @@ private:
                  weaveEvery { juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight };
     std::optional<neuro::SeqPattern> compareSnapshot; // A/B: the pattern before the last mutation
     int compareIndex = -1;
+    LearnOverlay learnOverlay { *this };   // declared last: on top of everything
     std::array<juce::TextButton, 4> stepPageButtons;
 
     // Selected-pad panel

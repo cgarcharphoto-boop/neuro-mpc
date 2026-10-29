@@ -1,5 +1,6 @@
 #include "Core/Arpeggiator.h"
 #include "Core/KeyDetector.h"
+#include "Core/MidiMap.h"
 #include "Core/PadBank.h"
 #include "Core/PatternTools.h"
 #include "Core/PitchDetector.h"
@@ -986,6 +987,24 @@ static void advancedSequencingTests()
     }
 }
 
+static void midiMapTests()
+{
+    using S = MidiBinding::Source;
+    MidiMap map;
+    map.learn ("param:gain", S::cc, 0, 70);
+    map.learn ("ui:evolve.reverse", S::note, 10, 36);
+    CHECK (map.find (S::cc, 3, 70) == 0 && map.find (S::note, 10, 36) == 1 && map.find (S::note, 1, 36) == -1);
+    map.learn ("param:attack", S::cc, 0, 70); // same source -> replaces
+    CHECK (map.getBindings().size() == 2 && map.getBindings()[1].target == "param:attack");
+    map.learn ("param:attack", S::cc, 2, 71); // a target can have several sources
+    CHECK (map.bindingsFor ("param:attack").size() == 2);
+    MidiMapTable table (map);
+    CHECK (table.find (S::cc, 7, 70) >= 0 && table.find (S::cc, 2, 71) >= 0 && table.find (S::cc, 3, 71) == -1);
+    CHECK (table.find (S::note, 10, 36) >= 0 && table.find (S::note, 9, 36) == -1);
+    map.removeTarget ("param:attack");
+    CHECK (map.getBindings().size() == 1 && MidiMap::describe (map.getBindings()[0]) == "Note C1 (36), ch 10");
+}
+
 static void keyTests()
 {
     auto print = [] (const char* name, const KeyEstimate& k)
@@ -1036,6 +1055,7 @@ int main()
     arpGenerativeTests();
     sequencerTests();
     advancedSequencingTests();
+    midiMapTests();
     keyTests();
     std::printf (failures == 0 ? "All core tests passed\n" : "%d failure(s)\n", failures);
     return failures == 0 ? EXIT_SUCCESS : EXIT_FAILURE;

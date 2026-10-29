@@ -4,6 +4,7 @@
 #include <juce_audio_formats/juce_audio_formats.h>
 #include "Audio/VoiceEngine.h"
 #include "Core/Arpeggiator.h"
+#include "Core/MidiMap.h"
 #include "Core/RtShared.h"
 #include "Core/PatternTools.h"
 #include "Core/Sequencer.h"
@@ -58,6 +59,9 @@ namespace ParamIDs
     inline constexpr auto weaveFill    = "weaveFill";
     inline constexpr auto weaveFillEvery = "weaveFillEvery";
     inline constexpr auto weavePitch   = "weavePitch";
+    inline constexpr auto padBank      = "padBank";
+    inline constexpr auto padBankFollow = "padBankFollow";
+    inline constexpr auto padChannel   = "padChannel";
 }
 
 class NeuroMPCProcessor : public juce::AudioProcessor,
@@ -138,6 +142,30 @@ public:
     int getSelectedSeqPattern() const noexcept                  { return (int) seqPatternParam->load() - 1; }
     int64_t getSeqPlayStep() const noexcept                     { return seqPlayStep.load(); } // -1 when stopped
 
+    // ---- MIDI Learn ----
+    // Targets: "param:<id>" (CC = value, note = toggle / next step / velocity), "param:<id>@<step>" (sets that step),
+    // or "ui:<id>" (an editor control; runs on the message thread while the editor is open). Mapped messages are consumed.
+    const neuro::MidiMap& getMidiMap() const noexcept           { return midiMap; }
+    void editMidiMap (const std::function<void (neuro::MidiMap&)>&);
+    void startMidiLearn (const juce::String& target);
+    void stopMidiLearn();
+    bool isMidiLearning() const noexcept                        { return learnArmed.load(); }
+    juce::String getMidiLearnTarget() const                     { return learnTarget; }
+    juce::String describeMidiBindings (const juce::String& target) const;
+    void applyMpkMiniMk2Template(); // measured from a connected MPK mini mk2 (see .cpp)
+
+    // Hardware pads: the controller notes of hardware pads 1..16. With "pads follow bank" on, hardware pad n plays
+    // NEURO pad n of the selected bank (by position, like MPC pads). Learn by hitting the 16 pads in NEURO pad order.
+    std::array<int, neuro::padsPerBank> getHardwarePadNotes() const noexcept { return hardwarePadNotes; }
+    void setHardwarePadNotes (const std::array<int, neuro::padsPerBank>&);
+    void startPadLayoutLearn();
+    void stopPadLayoutLearn();
+    int getPadLayoutLearnProgress() const noexcept { return padLayoutLearnArmed.load() ? (int) padLayoutCaptured.size() : -1; }
+    // The editor registers its "ui:" controls and a handler (value 0..1 for CC, -1 for a note trigger).
+    void setUiTargets (std::vector<std::string> ids, std::function<void (int, float)> handler);
+    void clearUiTargets();
+    void processMidiQueues(); // message thread (also run by the internal timer)
+
     // Arpeggiator live activity for the UI.
     int getArpLastNote() const noexcept                         { return arpLastNote.load(); }
     int getArpHeldCount() const noexcept                        { return arpHeldCount.load(); }
@@ -179,6 +207,8 @@ private:
     void updateKeyboardMap();
     void renderWithModulation (juce::AudioBuffer<float>&, int from, int to);
     void updateArpSettings (double bpm);
+    void publishMidiRouting();
+    bool handleMappedMidi (const juce::MidiMessage&); // audio thread; true = consumed
     void timerCallback() override { processBackgroundResults(); }
 
     std::shared_ptr<const neuro::SampleData> sample;
@@ -232,7 +262,8 @@ private:
     };
     neuro::Arpeggiator arp;
     neuro::Sequencer sequencer;
-    SeqBank seqPatterns;
+    std::unique_ptr<SeqBank> seqPatternStore = std::make_unique<SeqBank>(); // ~0.5 MB: heap, not inline
+    SeqBank& seqPatterns = *seqPatternStore;
     neuro::RtShared<SeqBank> rtSeq;
     double seqFreeOrigin = 0.0;
     bool seqWasRunning = false;
@@ -242,6 +273,33 @@ private:
                        *weaveFillParam = nullptr, *weaveFillEveryParam = nullptr, *weavePitchParam = nullptr;
     std::array<std::vector<neuro::SeqPattern>, numSeqPatterns> seqUndo, seqRedo;
     std::array<double, numSeqPatterns> seqLastUndoTime {};
+
+    // MIDI Learn
+    struct MidiRouting
+    {
+        struct Target { enum Kind { none, parameter, control } kind = none; juce::RangedAudioParameter* param = nullptr; int step = -1; int ui = -1; };
+        neuro::MidiMapTable table;
+        std::vector<Target> targets; // by binding index
+    };
+    neuro::MidiMap midiMap;
+    neuro::RtShared<MidiRouting> rtMidi;
+    std::vector<std::string> uiTargets;
+    std::function<void (int, float)> uiHandler;
+    juce::String learnTarget;
+    std::atomic<bool> learnArmed { false };
+    struct LearnedMessage { int source, channel, number; };
+    struct UiAction { int index; float value; };
+    juce::AbstractFifo learnFifo { 16 }, actionFifo { 256 };
+    std::array<LearnedMessage, 16> learned {};
+    std::array<UiAction, 256> uiActions {};
+    std::array<int, 128> padNoteHeld {}; // incoming note -> pad note it was translated to (for the note-off)
+    struct HardwarePads { std::array<int8_t, 128> indexOfNote; };
+    std::array<int, neuro::padsPerBank> hardwarePadNotes {};
+    neuro::RtShared<HardwarePads> rtHardwarePads;
+    std::atomic<bool> padLayoutLearnArmed { false };
+    std::vector<int> padLayoutCaptured;
+    void publishHardwarePads();
+    std::atomic<float> *padBankParam = nullptr, *padBankFollowParam = nullptr, *padChannelParam = nullptr;
     neuro::ArpProgram arpProgram;
     neuro::RtShared<neuro::ArpProgram> rtArpProgram;
     std::array<Event, 1024> events {};

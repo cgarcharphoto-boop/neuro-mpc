@@ -59,9 +59,19 @@ NeuroMPCProcessor::NeuroMPCProcessor()
     weaveFillParam         = apvts.getRawParameterValue (ParamIDs::weaveFill);
     weaveFillEveryParam    = apvts.getRawParameterValue (ParamIDs::weaveFillEvery);
     weavePitchParam        = apvts.getRawParameterValue (ParamIDs::weavePitch);
+    padBankParam       = apvts.getRawParameterValue (ParamIDs::padBank);
+    padBankFollowParam = apvts.getRawParameterValue (ParamIDs::padBankFollow);
+    padChannelParam    = apvts.getRawParameterValue (ParamIDs::padChannel);
+    padNoteHeld.fill (-1);
+
+    for (int i = 0; i < neuro::padsPerBank; ++i)
+        hardwarePadNotes[(size_t) i] = neuro::PadBank::baseNote + i; // generic 16-pad layout: notes 36-51
+
+    publishHardwarePads();
+    publishMidiRouting();
     rtSeq.publish (std::make_shared<const SeqBank> (seqPatterns));
     publishPads();
-    startTimerHz (20);
+    startTimerHz (50); // background results, MIDI-learn and mapped UI actions
 }
 
 NeuroMPCProcessor::~NeuroMPCProcessor()
@@ -180,7 +190,13 @@ juce::AudioProcessorValueTreeState::ParameterLayout NeuroMPCProcessor::createLay
         std::make_unique<AudioParameterInt> (ParameterID { ParamIDs::weaveFillEvery, 1 }, "Weave Fill Every (bars)", 1, 16, 4),
         std::make_unique<AudioParameterInt> (ParameterID { ParamIDs::weavePitch, 1 }, "Weave Pitch From", 0, numSeqPatterns, 0,
                                              AudioParameterIntAttributes().withStringFromValueFunction (
-                                                 [] (int v, int) { return v == 0 ? String ("none") : "pattern " + String (v); }))
+                                                 [] (int v, int) { return v == 0 ? String ("none") : "pattern " + String (v); })),
+        std::make_unique<AudioParameterChoice> (ParameterID { ParamIDs::padBank, 1 }, "Pad Bank", StringArray { "A", "B", "C", "D" }, 0),
+        std::make_unique<AudioParameterBool> (ParameterID { ParamIDs::padBankFollow, 1 }, "Pads Follow Bank", true),
+        std::make_unique<AudioParameterChoice> (ParameterID { ParamIDs::padChannel, 1 }, "Pad MIDI Channel", [] {
+                                                    StringArray names { "Any" };
+                                                    for (int c = 1; c <= 16; ++c) names.add (String (c));
+                                                    return names; }(), 0)
     };
 }
 
@@ -337,20 +353,47 @@ void NeuroMPCProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
         for (int i = 0; i < scope.blockSize2; ++i) handleUi (uiNotes[(size_t) (scope.startIndex2 + i)]);
     }
 
+    // Hardware pads: hardware pad n (learned note layout) plays NEURO pad n of the selected bank, by position.
+    const auto padBankIndex = juce::jlimit (0, neuro::numBanks - 1, (int) padBankParam->load());
+    const auto followBank = padBankFollowParam->load() > 0.5f && ! vp.keyboardMode && padMap != nullptr;
+    const auto* hardwarePads = rtHardwarePads.acquire();
+    const auto padChannel = (int) padChannelParam->load(); // 0 = any
+
+    auto translatePadNote = [&] (int note, int channel, bool on)
+    {
+        if (! on)
+        {
+            const auto held = std::exchange (padNoteHeld[(size_t) note], -1);
+            return held >= 0 ? held : note;
+        }
+
+        const auto pad = hardwarePads != nullptr ? hardwarePads->indexOfNote[(size_t) note] : (int8_t) -1;
+
+        if (! followBank || pad < 0 || (padChannel != 0 && channel != padChannel))
+            return note;
+
+        const auto translated = (*padMap)[(size_t) (padBankIndex * neuro::padsPerBank + pad)].note;
+        padNoteHeld[(size_t) note] = translated;
+        return translated;
+    };
+
     for (const auto meta : midi)
     {
         const auto t = juce::jlimit (0, juce::jmax (0, numSamples - 1), meta.samplePosition);
         const auto msg = meta.getMessage();
 
+        if (handleMappedMidi (msg))
+            continue; // MIDI Learn: learned or mapped messages do not play
+
         if (msg.isNoteOn())
         {
             lastMidiNote.store (msg.getNoteNumber());
             midiNoteCount.fetch_add (1);
-            noteInput (t, msg.getNoteNumber(), msg.getFloatVelocity());
+            noteInput (t, translatePadNote (msg.getNoteNumber(), msg.getChannel(), true), msg.getFloatVelocity());
         }
         else if (msg.isNoteOff())
         {
-            noteInput (t, msg.getNoteNumber(), 0.0f);
+            noteInput (t, translatePadNote (msg.getNoteNumber(), msg.getChannel(), false), 0.0f);
         }
         else if (msg.isPitchWheel())
         {
@@ -510,6 +553,281 @@ void NeuroMPCProcessor::renderWithModulation (juce::AudioBuffer<float>& buffer, 
         engine.render (buffer, from, n, modBuffer.data());
         from += n;
     }
+}
+
+// ---- MIDI Learn ----
+
+bool NeuroMPCProcessor::handleMappedMidi (const juce::MidiMessage& msg)
+{
+    using Source = neuro::MidiBinding::Source;
+    const auto isCc = msg.isController();
+    const auto isNote = msg.isNoteOnOrOff();
+
+    if (! isCc && ! isNote)
+        return false;
+
+    const auto source = isCc ? Source::cc : Source::note;
+    const auto number = isCc ? msg.getControllerNumber() : msg.getNoteNumber();
+
+    if (padLayoutLearnArmed.load() && isNote)
+    {
+        if (msg.isNoteOn())
+        {
+            const auto scope = learnFifo.write (1);
+
+            if (scope.blockSize1 > 0)
+                learned[(size_t) scope.startIndex1] = { 2, msg.getChannel(), number }; // 2 = pad layout capture
+        }
+
+        return true; // consumed while learning the layout
+    }
+
+    if (learnArmed.load() && (isCc || msg.isNoteOn()))
+    {
+        if (learnArmed.exchange (false))
+        {
+            const auto scope = learnFifo.write (1);
+
+            if (scope.blockSize1 > 0)
+                learned[(size_t) scope.startIndex1] = { (int) source, msg.getChannel(), number };
+        }
+
+        return true;
+    }
+
+    const auto* routing = rtMidi.acquire();
+    const auto index = routing != nullptr ? routing->table.find (source, msg.getChannel(), number) : -1;
+
+    if (index < 0 || index >= (int) routing->targets.size())
+        return false;
+
+    const auto& target = routing->targets[(size_t) index];
+
+    if (isNote && ! msg.isNoteOn())
+        return true; // note-offs of mapped notes are swallowed too
+
+    if (target.kind == MidiRouting::Target::parameter && target.param != nullptr)
+    {
+        auto* p = target.param;
+        const auto steps = p->getNumSteps();
+        const auto discrete = p->isDiscrete() || p->isBoolean();
+        float value = p->getValue();
+
+        if (target.step >= 0)
+        {
+            if (isCc && msg.getControllerValue() < 64)
+                return true;
+
+            value = steps > 1 ? (float) target.step / (float) (steps - 1) : 0.0f;
+        }
+        else if (isCc)
+        {
+            value = (float) msg.getControllerValue() / 127.0f;
+        }
+        else if (p->isBoolean())
+        {
+            value = value >= 0.5f ? 0.0f : 1.0f;                                           // note toggles
+        }
+        else if (discrete && steps > 1)
+        {
+            const auto current = juce::roundToInt (value * (float) (steps - 1));
+            value = (float) ((current + 1) % steps) / (float) (steps - 1);                // note steps through choices
+        }
+        else
+        {
+            value = msg.getFloatVelocity();                                                // note sets by velocity
+        }
+
+        p->setValueNotifyingHost (juce::jlimit (0.0f, 1.0f, value));
+    }
+    else if (target.kind == MidiRouting::Target::control)
+    {
+        const auto scope = actionFifo.write (1);
+
+        if (scope.blockSize1 > 0)
+            uiActions[(size_t) scope.startIndex1] = { target.ui, isCc ? (float) msg.getControllerValue() / 127.0f : -1.0f };
+        else if (scope.blockSize2 > 0)
+            uiActions[(size_t) scope.startIndex2] = { target.ui, isCc ? (float) msg.getControllerValue() / 127.0f : -1.0f };
+    }
+
+    return true;
+}
+
+void NeuroMPCProcessor::publishMidiRouting()
+{
+    auto routing = std::make_shared<MidiRouting>();
+    routing->table = neuro::MidiMapTable (midiMap);
+
+    for (const auto& b : midiMap.getBindings())
+    {
+        MidiRouting::Target t;
+        const juce::String target (b.target);
+
+        if (target.startsWith ("param:"))
+        {
+            const auto spec = target.fromFirstOccurrenceOf ("param:", false, false);
+            t.param = apvts.getParameter (spec.upToFirstOccurrenceOf ("@", false, false));
+            t.step = spec.contains ("@") ? spec.fromFirstOccurrenceOf ("@", false, false).getIntValue() : -1;
+            t.kind = t.param != nullptr ? MidiRouting::Target::parameter : MidiRouting::Target::none;
+        }
+        else if (target.startsWith ("ui:"))
+        {
+            const auto it = std::find (uiTargets.begin(), uiTargets.end(), b.target);
+            t.ui = it != uiTargets.end() ? (int) (it - uiTargets.begin()) : -1;
+            t.kind = t.ui >= 0 ? MidiRouting::Target::control : MidiRouting::Target::none; // still consumed while the editor is closed
+        }
+
+        routing->targets.push_back (t);
+    }
+
+    rtMidi.publish (routing);
+}
+
+void NeuroMPCProcessor::editMidiMap (const std::function<void (neuro::MidiMap&)>& edit)
+{
+    const std::scoped_lock lock (modelLock);
+    edit (midiMap);
+    publishMidiRouting();
+}
+
+void NeuroMPCProcessor::startMidiLearn (const juce::String& target)
+{
+    learnTarget = target;
+    learnArmed.store (true);
+}
+
+void NeuroMPCProcessor::stopMidiLearn()
+{
+    learnArmed.store (false);
+    learnTarget.clear();
+}
+
+juce::String NeuroMPCProcessor::describeMidiBindings (const juce::String& target) const
+{
+    juce::StringArray parts;
+
+    for (const auto* b : midiMap.bindingsFor (target.toStdString()))
+        parts.add (neuro::MidiMap::describe (*b));
+
+    return parts.joinIntoString ("; ");
+}
+
+void NeuroMPCProcessor::setUiTargets (std::vector<std::string> ids, std::function<void (int, float)> handler)
+{
+    uiTargets = std::move (ids);
+    uiHandler = std::move (handler);
+    publishMidiRouting();
+}
+
+void NeuroMPCProcessor::clearUiTargets()
+{
+    uiTargets.clear();
+    uiHandler = nullptr;
+    publishMidiRouting();
+}
+
+void NeuroMPCProcessor::processMidiQueues()
+{
+    for (auto ready = learnFifo.getNumReady(); ready > 0; --ready)
+    {
+        LearnedMessage m {};
+
+        {
+            const auto scope = learnFifo.read (1);
+
+            if (scope.blockSize1 > 0)
+                m = learned[(size_t) scope.startIndex1];
+        }
+
+        if (m.source == 2)
+        {
+            if (padLayoutLearnArmed.load() && std::find (padLayoutCaptured.begin(), padLayoutCaptured.end(), m.number) == padLayoutCaptured.end())
+                padLayoutCaptured.push_back (m.number);
+
+            if ((int) padLayoutCaptured.size() == neuro::padsPerBank)
+                stopPadLayoutLearn();
+
+            continue;
+        }
+
+        if (learnTarget.isNotEmpty())
+            editMidiMap ([&] (auto& map) { map.learn (learnTarget.toStdString(), (neuro::MidiBinding::Source) m.source, m.channel, m.number); });
+
+        learnTarget.clear();
+    }
+
+    const auto scope = actionFifo.read (actionFifo.getNumReady());
+    auto run = [this] (const UiAction& a) { if (uiHandler) uiHandler (a.index, a.value); };
+
+    for (int i = 0; i < scope.blockSize1; ++i) run (uiActions[(size_t) (scope.startIndex1 + i)]);
+    for (int i = 0; i < scope.blockSize2; ++i) run (uiActions[(size_t) (scope.startIndex2 + i)]);
+}
+
+// Akai MPK mini mk2, measured on 2026-10-29 from a connected unit (CoreMIDI capture): knobs K1-K8 send CC 1-8 on
+// channel 1 (CC 1 is shared with the joystick's mod axis); pads send on channel 1: bank A notes 36,32,37,33,38,34,39,35,
+// bank B notes 48,44,49,45,50,46,51,47 (in the order they were hit); joystick X = pitch bend. If the hit order did not
+// follow NEURO's pad order, re-run "Learn hardware pad layout".
+void NeuroMPCProcessor::applyMpkMiniMk2Template()
+{
+    static constexpr std::pair<int, const char*> knobs[] {
+        { 1, ParamIDs::gain }, { 2, ParamIDs::attack }, { 3, ParamIDs::release }, { 4, ParamIDs::transpose },
+        { 5, ParamIDs::lfoDepth }, { 6, ParamIDs::lfoRate }, { 7, ParamIDs::arpGate }, { 8, ParamIDs::seqSwing } };
+
+    editMidiMap ([] (auto& map)
+    {
+        for (auto [cc, id] : knobs)
+            map.learn (std::string ("param:") + id, neuro::MidiBinding::Source::cc, 1, cc);
+    });
+
+    setHardwarePadNotes ({ 36, 32, 37, 33, 38, 34, 39, 35, 48, 44, 49, 45, 50, 46, 51, 47 });
+
+    for (auto [id, value] : { std::pair { ParamIDs::padChannel, 0.0f }, { ParamIDs::padBankFollow, 1.0f } })
+    {
+        auto* p = apvts.getParameter (id);
+        p->setValueNotifyingHost (p->convertTo0to1 (value));
+    }
+}
+
+void NeuroMPCProcessor::setHardwarePadNotes (const std::array<int, neuro::padsPerBank>& notes)
+{
+    hardwarePadNotes = notes;
+    publishHardwarePads();
+}
+
+void NeuroMPCProcessor::publishHardwarePads()
+{
+    auto layout = std::make_shared<HardwarePads>();
+    layout->indexOfNote.fill (-1);
+
+    for (int i = 0; i < neuro::padsPerBank; ++i)
+        if (juce::isPositiveAndBelow (hardwarePadNotes[(size_t) i], 128))
+            layout->indexOfNote[(size_t) hardwarePadNotes[(size_t) i]] = (int8_t) i;
+
+    rtHardwarePads.publish (layout);
+}
+
+void NeuroMPCProcessor::startPadLayoutLearn()
+{
+    stopMidiLearn();
+    padLayoutCaptured.clear();
+    padLayoutLearnArmed.store (true);
+}
+
+// Ends layout learning; a complete capture (16 pads) replaces the layout, a partial one replaces only those pads.
+void NeuroMPCProcessor::stopPadLayoutLearn()
+{
+    if (! padLayoutLearnArmed.exchange (false))
+        return;
+
+    auto notes = hardwarePadNotes;
+
+    for (size_t i = 0; i < padLayoutCaptured.size() && i < notes.size(); ++i)
+        notes[i] = padLayoutCaptured[i];
+
+    if (! padLayoutCaptured.empty())
+        setHardwarePadNotes (notes);
+
+    padLayoutCaptured.clear();
 }
 
 void NeuroMPCProcessor::updateArpSettings (double bpm)
@@ -727,17 +1045,6 @@ void NeuroMPCProcessor::editArpProgram (const std::function<void (neuro::ArpProg
     const std::scoped_lock lock (modelLock);
     edit (arpProgram);
     rtArpProgram.publish (std::make_shared<const neuro::ArpProgram> (arpProgram));
-    seqModeParam    = apvts.getRawParameterValue (ParamIDs::seqMode);
-    seqPatternParam = apvts.getRawParameterValue (ParamIDs::seqPattern);
-    seqRateParam    = apvts.getRawParameterValue (ParamIDs::seqRate);
-    seqSwingParam   = apvts.getRawParameterValue (ParamIDs::seqSwing);
-    seqFillParam           = apvts.getRawParameterValue (ParamIDs::seqFill);
-    weaveAccentParam       = apvts.getRawParameterValue (ParamIDs::weaveAccent);
-    weaveAccentAmountParam = apvts.getRawParameterValue (ParamIDs::weaveAccentAmount);
-    weaveFillParam         = apvts.getRawParameterValue (ParamIDs::weaveFill);
-    weaveFillEveryParam    = apvts.getRawParameterValue (ParamIDs::weaveFillEvery);
-    weavePitchParam        = apvts.getRawParameterValue (ParamIDs::weavePitch);
-    rtSeq.publish (std::make_shared<const SeqBank> (seqPatterns));
 }
 
 void NeuroMPCProcessor::editPads (const std::function<void (neuro::PadBank&)>& edit)
@@ -857,6 +1164,8 @@ void NeuroMPCProcessor::refreshStretch()
 
 void NeuroMPCProcessor::processBackgroundResults()
 {
+    processMidiQueues();
+
     for (auto& r : analyser.takeCompleted())
     {
         if (auto it = analysisRequested.find (r.sliceId); it != analysisRequested.end() && it->second == std::pair (r.start, r.end))
@@ -1070,6 +1379,26 @@ juce::ValueTree NeuroMPCProcessor::createStateTree() const
     }
 
     root.appendChild (seqTree, nullptr);
+
+    juce::ValueTree midiTree ("MIDI_MAP");
+    juce::StringArray padNotes;
+
+    for (auto n : hardwarePadNotes)
+        padNotes.add (juce::String (n));
+
+    midiTree.setProperty ("hardwarePads", padNotes.joinIntoString (","), nullptr);
+
+    for (const auto& b : midiMap.getBindings())
+    {
+        juce::ValueTree t ("BINDING");
+        t.setProperty ("source", b.source == neuro::MidiBinding::Source::cc ? "cc" : "note", nullptr);
+        t.setProperty ("channel", b.channel, nullptr);
+        t.setProperty ("number", b.number, nullptr);
+        t.setProperty ("target", juce::String (b.target), nullptr);
+        midiTree.appendChild (t, nullptr);
+    }
+
+    root.appendChild (midiTree, nullptr);
     return root;
 }
 
@@ -1107,9 +1436,34 @@ bool NeuroMPCProcessor::applyStateTree (juce::ValueTree root)
 
     keyboardSlice = root.getProperty ("keyboardSlice", 0);
 
+    if (auto midiTree = root.getChildWithName ("MIDI_MAP"); midiTree.isValid())
+    {
+        midiMap.clear();
+        juce::StringArray padNotes;
+        padNotes.addTokens (midiTree.getProperty ("hardwarePads", "").toString(), ",", "");
+
+        if (padNotes.size() == neuro::padsPerBank)
+        {
+            std::array<int, neuro::padsPerBank> notes {};
+
+            for (int i = 0; i < neuro::padsPerBank; ++i)
+                notes[(size_t) i] = juce::jlimit (-1, 127, padNotes[i].getIntValue());
+
+            setHardwarePadNotes (notes);
+        }
+
+        for (const auto& t : midiTree)
+            midiMap.learn (t.getProperty ("target", "").toString().toStdString(),
+                           t.getProperty ("source", "cc").toString() == "note" ? neuro::MidiBinding::Source::note : neuro::MidiBinding::Source::cc,
+                           (int) t.getProperty ("channel", 0), (int) t.getProperty ("number", 0));
+
+        publishMidiRouting();
+    }
+
     if (auto seqTree = root.getChildWithName ("SEQUENCER"); seqTree.isValid())
     {
-        seqPatterns = {};
+        for (auto& pattern : seqPatterns)
+            pattern = {}; // in place: a SeqBank temporary would be ~0.5 MB of stack
 
         for (const auto& pt : seqTree)
         {

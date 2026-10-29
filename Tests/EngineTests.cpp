@@ -1,5 +1,6 @@
 // Headless integration tests: drive the real NeuroMPCProcessor with files, MIDI and state.
 #include "PluginProcessor.h"
+#include "PluginEditor.h"
 #include "Core/TransientDetector.h"
 
 static int failures = 0;
@@ -521,6 +522,8 @@ int main()
         CHECK (std::abs (render (d, 30, { { 0, 37, 1.0f } }).peak - 0.2f) < 0.01f); // follow mode: pad 2 = slice 2
 
         // Custom note + layering: pads A1 and A2 both on note 60 play slices 1 and 2 together.
+        // (Hardware-pad follow is positional; custom pad notes are about the notes other sources send, so test without it.)
+        setParam (d, ParamIDs::padBankFollow, 0.0f);
         d.editPads ([] (auto& b) { b[0].note = 60; b[1].note = 60; });
         CHECK (render (d, 30, { { 0, 36, 1.0f } }).nonZero == 0);
         CHECK (std::abs (render (d, 30, { { 0, 60, 1.0f } }).peak - 0.3f) < 0.01f);
@@ -783,7 +786,7 @@ int main()
             "arpGate", "arpOctaves", "arpSwing", "arpProbability", "arpRepeats", "arpVelocity", "arpRetrigger", "arpSeed", "arpAccent",
             "arpPhrase", "arpVariation", "arpVaryPitch", "arpVaryVelocity", "arpVaryRhythm", "arpReturn", "arpHumanTime",
             "arpHumanVelocity", "seqMode", "seqPattern", "seqRate", "seqSwing", "seqFill", "weaveAccent", "weaveAccentAmount",
-            "weaveFill", "weaveFillEvery", "weavePitch" };
+            "weaveFill", "weaveFillEvery", "weavePitch", "padBank", "padBankFollow", "padChannel" };
         NeuroMPCProcessor a;
         juce::StringArray ids;
         for (auto* param : a.getParameters())
@@ -970,6 +973,136 @@ int main()
         const auto load = ms / 10000.0 * 100.0;
         std::printf ("  worst case (32 voices + LFO + 16-lane 1/32 x4 ratchets + arp): 10 s audio in %.0f ms = %.2f%% of one core\n", ms, load);
         CHECK (load < 25.0);
+    }
+
+    // ---- MIDI mapping: learn, CC/note -> params, note/CC -> any UI control, hardware pad banks ----
+    {
+        writeTestWav (wavFile);
+        NeuroMPCProcessor mm;
+        mm.prepareToPlay (rate, block);
+        CHECK (mm.loadSample (wavFile, error));
+        mm.editSlices ([] (auto& s) { s.grid (64); }); // pads A1..D16 follow slices 1..64 (levels 0.1 .. 0.4 by quarter)
+        setParam (mm, ParamIDs::attack, 0.0f);
+        auto send = [&] (std::vector<juce::MidiMessage> msgs, int blocks = 1)
+        {
+            std::vector<float> out;
+            juce::AudioBuffer<float> buf (2, block);
+            for (int b = 0; b < blocks; ++b)
+            {
+                juce::MidiBuffer midi;
+                if (b == 0) for (auto& m : msgs) midi.addEvent (m, 0);
+                mm.processBlock (buf, midi);
+                out.insert (out.end(), buf.getReadPointer (0), buf.getReadPointer (0) + block);
+            }
+            mm.processMidiQueues();
+            return out;
+        };
+        auto peak = [] (const std::vector<float>& y) { float m = 0.0f; for (auto v : y) m = std::max (m, std::abs (v)); return m; };
+        auto value = [&] (const char* id) { return mm.apvts.getRawParameterValue (id)->load(); };
+
+        // Learn: arm a target, the next CC binds to it (and is consumed), later CCs drive it.
+        mm.startMidiLearn ("param:transpose");
+        send ({ juce::MidiMessage::controllerEvent (1, 74, 10) });
+        CHECK (! mm.isMidiLearning() && mm.getMidiMap().getBindings().size() == 1);
+        CHECK (mm.describeMidiBindings ("param:transpose") == "CC 74, ch 1");
+        send ({ juce::MidiMessage::controllerEvent (1, 74, 127) });
+        CHECK (std::abs (value (ParamIDs::transpose) - 24.0f) < 0.01f);
+        send ({ juce::MidiMessage::controllerEvent (1, 74, 0) });
+        CHECK (std::abs (value (ParamIDs::transpose) + 24.0f) < 0.01f);
+        send ({ juce::MidiMessage::controllerEvent (2, 74, 127) }); // learned on channel 1 only
+        CHECK (std::abs (value (ParamIDs::transpose) + 24.0f) < 0.01f);
+        setParam (mm, ParamIDs::transpose, 0.0f);
+
+        // Note -> bool toggles and is not played; note -> choice steps; note -> fixed step (pad bank C).
+        mm.editMidiMap ([] (auto& map)
+        {
+            map.learn ("param:arpLatch", neuro::MidiBinding::Source::note, 0, 36);
+            map.learn ("param:seqRate", neuro::MidiBinding::Source::note, 0, 37);
+            map.learn ("param:padBank@2", neuro::MidiBinding::Source::note, 0, 38);
+        });
+        CHECK (peak (send ({ juce::MidiMessage::noteOn (10, 36, 1.0f) }, 4)) == 0.0f && value (ParamIDs::arpLatch) > 0.5f);
+        send ({ juce::MidiMessage::noteOff (10, 36) , juce::MidiMessage::noteOn (10, 36, 1.0f) });
+        CHECK (value (ParamIDs::arpLatch) < 0.5f);
+        const auto rate0 = value (ParamIDs::seqRate);
+        send ({ juce::MidiMessage::noteOn (1, 37, 1.0f) });
+        CHECK ((int) value (ParamIDs::seqRate) == ((int) rate0 + 1) % 6);
+        send ({ juce::MidiMessage::noteOn (1, 38, 1.0f) });
+        CHECK ((int) value (ParamIDs::padBank) == 2);
+        mm.editMidiMap ([] (auto& map) { map.clear(); });
+
+        // Hardware pad banks: notes 36-51 reach the selected bank. Bank C (2): note 36 -> pad C1 = slice 33 (level 0.3).
+        CHECK (std::abs (peak (send ({ juce::MidiMessage::noteOn (10, 36, 1.0f) }, 4)) - 0.3f) < 0.005f);
+        setParam (mm, ParamIDs::padBank, 0.0f);
+        CHECK (std::abs (peak (send ({ juce::MidiMessage::allNotesOff (1), juce::MidiMessage::noteOn (10, 36, 1.0f) }, 4)) - 0.1f) < 0.005f);
+        // Pad channel 10: keys on channel 1 are not shifted (bank D selected: ch 10 note 36 -> D1 = 0.4; ch 1 -> A1 = 0.1).
+        setParam (mm, ParamIDs::padBank, 3.0f);
+        setParam (mm, ParamIDs::padChannel, 10.0f);
+        CHECK (std::abs (peak (send ({ juce::MidiMessage::allNotesOff (1), juce::MidiMessage::noteOn (10, 36, 1.0f) }, 4)) - 0.4f) < 0.005f);
+        CHECK (std::abs (peak (send ({ juce::MidiMessage::allNotesOff (1), juce::MidiMessage::noteOn (1, 36, 1.0f) }, 4)) - 0.1f) < 0.005f);
+        // The note-off goes to the pad its note-on reached, even if the bank changed in between (gate mode).
+        setParam (mm, ParamIDs::playMode, 1.0f);
+        setParam (mm, ParamIDs::release, 1.0f);
+        send ({ juce::MidiMessage::allNotesOff (1), juce::MidiMessage::noteOn (10, 36, 1.0f) });
+        setParam (mm, ParamIDs::padBank, 0.0f);
+        auto after = send ({ juce::MidiMessage::noteOff (10, 36) }, 2);
+        CHECK (std::abs (after.back()) == 0.0f);
+
+        // Editor: every button, slider and selector is mappable, IDs are unique, and a mapped note runs a UI action.
+        {
+            std::unique_ptr<juce::AudioProcessorEditor> ed (mm.createEditor());
+            auto* editor = dynamic_cast<NeuroMPCEditor*> (ed.get());
+            CHECK (editor != nullptr);
+            const auto controls = editor->getMappableControls();
+            juce::StringArray ids;
+            for (auto* c : controls) ids.add (c->getComponentID());
+            auto unique = ids;
+            unique.removeDuplicates (false);
+            std::printf ("  mappable controls: %d (unmappable: %d)\n", ids.size(), editor->countUnmappableControls());
+            CHECK (editor->countUnmappableControls() == 0 && unique.size() == ids.size() && ids.size() > 150);
+
+            mm.editSeqPattern (0, [] (auto& pat) { pat.lanes[0].steps[0].on = true; });
+            mm.editMidiMap ([] (auto& map) { map.learn ("ui:evolve.reverse", neuro::MidiBinding::Source::note, 0, 60); });
+            send ({ juce::MidiMessage::noteOn (1, 60, 1.0f) });
+            CHECK (mm.getSeqPattern (0).lanes[0].steps[15].on && ! mm.getSeqPattern (0).lanes[0].steps[0].on);
+
+            // A CC drives a non-parameter slider (pattern length) and a selector (pad bank via button target).
+            mm.editMidiMap ([] (auto& map) { map.learn ("ui:gen.length", neuro::MidiBinding::Source::cc, 0, 20); });
+            send ({ juce::MidiMessage::controllerEvent (1, 20, 0) });
+            CHECK (mm.getArpProgram().length == 1);
+            send ({ juce::MidiMessage::controllerEvent (1, 20, 127) });
+            CHECK (mm.getArpProgram().length == 16);
+        }
+
+        // Closed editor: ui-mapped notes are still consumed (do not play); param mappings keep working.
+        CHECK (peak (send ({ juce::MidiMessage::allNotesOff (1), juce::MidiMessage::noteOn (1, 60, 1.0f) }, 4)) == 0.0f);
+
+        // Learned hardware pad layout (e.g. MPK mini mk2 pads: 32-39 / 44-51): hardware pad n -> NEURO pad n of the bank.
+        mm.editMidiMap ([] (auto& map) { map.clear(); });
+        setParam (mm, ParamIDs::playMode, 0.0f);
+        setParam (mm, ParamIDs::padChannel, 0.0f);
+        mm.startPadLayoutLearn();
+        const int hw[] { 36, 32, 37, 33, 38, 34, 39, 35, 48, 44, 49, 45, 50, 46, 51, 47 };
+        for (int n : hw)
+            CHECK (peak (send ({ juce::MidiMessage::noteOn (1, n, 1.0f) })) == 0.0f); // consumed while learning
+        CHECK (mm.getPadLayoutLearnProgress() == -1 && mm.getHardwarePadNotes()[1] == 32 && mm.getHardwarePadNotes()[15] == 47);
+        setParam (mm, ParamIDs::padBank, 1.0f);                     // bank B: pads 17-32 -> slices 17-32 (0.2 / 0.3)
+        CHECK (std::abs (peak (send ({ juce::MidiMessage::allNotesOff (1), juce::MidiMessage::noteOn (1, 32, 1.0f) }, 4)) - 0.2f) < 0.005f);
+        CHECK (std::abs (peak (send ({ juce::MidiMessage::allNotesOff (1), juce::MidiMessage::noteOn (1, 47, 1.0f) }, 4)) - 0.2f) < 0.005f); // pad B16 = slice 32
+        CHECK (std::abs (peak (send ({ juce::MidiMessage::allNotesOff (1), juce::MidiMessage::noteOn (1, 60, 1.0f) }, 4))) < 1.0f); // non-pad notes unaffected
+
+        // MPK mini mk2 template (measured): knobs CC 1-8 on channel 1.
+        mm.applyMpkMiniMk2Template();
+        send ({ juce::MidiMessage::controllerEvent (1, 4, 127) });
+        CHECK (std::abs (value (ParamIDs::transpose) - 24.0f) < 0.01f);
+        setParam (mm, ParamIDs::transpose, 0.0f);
+
+        // Mappings persist with the project.
+        juce::MemoryBlock st;
+        mm.getStateInformation (st);
+        NeuroMPCProcessor restoredMap;
+        restoredMap.setStateInformation (st.getData(), (int) st.getSize());
+        CHECK (restoredMap.getMidiMap().getBindings().size() == mm.getMidiMap().getBindings().size());
+        CHECK (restoredMap.getHardwarePadNotes() == mm.getHardwarePadNotes());
     }
 
     // Missing file on restore is reported, not substituted.
