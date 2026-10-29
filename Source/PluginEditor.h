@@ -44,11 +44,14 @@ private:
     void setSelectedPitch (float semitones);
     float selectedRoot() const; // reference for the 12-note selector
     void selectPad (int padIndex);
-    enum class Panel { slice, pad, arp, gen, seq };
+    enum class Panel { slice, pad, arp, gen, seq, evolve };
     void showPanel (Panel);
     void updateArpPanel();
     void updateGenPanel();
     void updateSeqPanel();
+    void updateEvolvePanel();
+    void forEachScopedLane (const std::function<void (neuro::SeqLane&, int)>&, NeuroMPCProcessor::Undo);
+    std::vector<juce::Component*> evolvePanelComponents();
     void editSelectedSeqStep (const std::function<void (neuro::SeqStep&)>&);
     std::vector<juce::Component*> seqPanelComponents();
     std::vector<juce::Component*> arpPanelComponents();
@@ -91,7 +94,7 @@ private:
     std::vector<std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment>> comboAttachments;
     std::vector<std::unique_ptr<Pad>> pads;
     std::array<juce::TextButton, neuro::numBanks> bankButtons;
-    juce::TextButton sliceTab { "SLICE" }, padTab { "PAD" }, arpTab { "ARP" }, genTab { "GEN" }, seqTab { "SEQ" };
+    juce::TextButton sliceTab { "SLICE" }, padTab { "PAD" }, arpTab { "ARP" }, genTab { "GEN" }, seqTab { "SEQ" }, evolveTab { "EVOLVE" };
     int currentBank = 0, selectedPad = 0, copiedPad = -1, learnBaseline = -1, shownSliceCount = -1;
     Panel activePanel = Panel::slice;
 
@@ -141,7 +144,31 @@ private:
                  stepMicro { juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight },
                  stepPitch { juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight },
                  laneLength { juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight };
-    juce::TextButton seqDuplicate { "Duplicate" }, seqClear { "Clear" }, lanePageButton { "Lanes 1-8" };
+    juce::TextButton seqDuplicate { "Duplicate" }, seqClear { "Clear" }, lanePageButton { "Lanes 1-8" }, seqUndo { "Undo" }, seqRedo { "Redo" };
+    juce::ToggleButton seqFill { "Fill" };
+    juce::ComboBox stepCondition;
+
+    // Evolve panel: transformations, mutation (genome), recombination, phrase weaving
+    juce::Label evolveTitle, mutateTitle, weaveTitle, genomeInfo;
+    juce::ComboBox evolveScope, velocityCurve, donorPattern, weaveAccent, weaveFill, weavePitch;
+    juce::TextButton xReverse { "Reverse" }, xLeft { "< Shift" }, xRight { "Shift >" }, xDouble { "x2" }, xHalve { "/2" },
+                     xExpand { "Expand" }, xContract { "Contract" }, applyCurve { "Apply" }, applyProfile { "Apply" },
+                     mutateButton { "Mutate" }, compareButton { "A/B" }, combineButton { "Take genes" }, evolveUndo { "Undo" },
+                     evolveRedo { "Redo" };
+    std::array<juce::ToggleButton, 7> geneToggles;
+    juce::Slider curveDepth { juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight },
+                 offbeatChance { juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight },
+                 mutIntensity { juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight },
+                 mutPreserve { juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight },
+                 mutDensity { juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight },
+                 mutPitch { juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight },
+                 mutVelocity { juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight },
+                 mutTiming { juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight },
+                 mutSeed { juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight },
+                 weaveAmount { juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight },
+                 weaveEvery { juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight };
+    std::optional<neuro::SeqPattern> compareSnapshot; // A/B: the pattern before the last mutation
+    int compareIndex = -1;
     std::array<juce::TextButton, 4> stepPageButtons;
 
     // Selected-pad panel

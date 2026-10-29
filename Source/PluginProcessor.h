@@ -5,6 +5,7 @@
 #include "Audio/VoiceEngine.h"
 #include "Core/Arpeggiator.h"
 #include "Core/RtShared.h"
+#include "Core/PatternTools.h"
 #include "Core/Sequencer.h"
 #include "DSP/Analysis.h"
 #include "DSP/BackgroundWorker.h"
@@ -51,6 +52,12 @@ namespace ParamIDs
     inline constexpr auto seqPattern   = "seqPattern";
     inline constexpr auto seqRate      = "seqRate";
     inline constexpr auto seqSwing     = "seqSwing";
+    inline constexpr auto seqFill      = "seqFill";
+    inline constexpr auto weaveAccent  = "weaveAccent";
+    inline constexpr auto weaveAccentAmount = "weaveAccentAmount";
+    inline constexpr auto weaveFill    = "weaveFill";
+    inline constexpr auto weaveFillEvery = "weaveFillEvery";
+    inline constexpr auto weavePitch   = "weavePitch";
 }
 
 class NeuroMPCProcessor : public juce::AudioProcessor,
@@ -102,7 +109,14 @@ public:
     static constexpr int numSeqPatterns = 16;
     using SeqBank = std::array<neuro::SeqPattern, numSeqPatterns>;
     const neuro::SeqPattern& getSeqPattern (int index) const    { return seqPatterns[(size_t) juce::jlimit (0, numSeqPatterns - 1, index)]; }
-    void editSeqPattern (int index, const std::function<void (neuro::SeqPattern&)>&);
+    // Undo: `record` snapshots before the edit (coalescing edits less than 0.4 s apart, e.g. a drag), `always` forces a
+    // separate step (transformations), `none` skips history (A/B compare swaps).
+    enum class Undo { none, record, always };
+    void editSeqPattern (int index, const std::function<void (neuro::SeqPattern&)>&, Undo = Undo::record);
+    bool undoSeqPattern (int index);
+    bool redoSeqPattern (int index);
+    bool canUndoSeqPattern (int index) const { return ! seqUndo[(size_t) juce::jlimit (0, numSeqPatterns - 1, index)].empty(); }
+    bool canRedoSeqPattern (int index) const { return ! seqRedo[(size_t) juce::jlimit (0, numSeqPatterns - 1, index)].empty(); }
     int getSelectedSeqPattern() const noexcept                  { return (int) seqPatternParam->load() - 1; }
     int64_t getSeqPlayStep() const noexcept                     { return seqPlayStep.load(); } // -1 when stopped
 
@@ -203,7 +217,11 @@ private:
     double seqFreeOrigin = 0.0;
     bool seqWasRunning = false;
     std::atomic<int64_t> seqPlayStep { -1 };
-    std::atomic<float> *seqModeParam = nullptr, *seqPatternParam = nullptr, *seqRateParam = nullptr, *seqSwingParam = nullptr;
+    std::atomic<float> *seqModeParam = nullptr, *seqPatternParam = nullptr, *seqRateParam = nullptr, *seqSwingParam = nullptr,
+                       *seqFillParam = nullptr, *weaveAccentParam = nullptr, *weaveAccentAmountParam = nullptr,
+                       *weaveFillParam = nullptr, *weaveFillEveryParam = nullptr, *weavePitchParam = nullptr;
+    std::array<std::vector<neuro::SeqPattern>, numSeqPatterns> seqUndo, seqRedo;
+    std::array<double, numSeqPatterns> seqLastUndoTime {};
     neuro::ArpProgram arpProgram;
     neuro::RtShared<neuro::ArpProgram> rtArpProgram;
     std::array<Event, 1024> events {};

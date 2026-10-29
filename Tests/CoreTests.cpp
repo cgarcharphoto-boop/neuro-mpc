@@ -1,6 +1,7 @@
 #include "Core/Arpeggiator.h"
 #include "Core/KeyDetector.h"
 #include "Core/PadBank.h"
+#include "Core/PatternTools.h"
 #include "Core/PitchDetector.h"
 #include "Core/RtShared.h"
 #include "Core/Scales.h"
@@ -785,6 +786,206 @@ static void sequencerTests()
     }
 }
 
+static void advancedSequencingTests()
+{
+    // Runs a bank with weaving; returns on-events (step index, note, velocity, pitch). 1 step = 6000 samples.
+    auto runBank = [] (const std::vector<SeqPattern>& bank, const SeqWeave& weave, SeqTiming timing, int steps)
+    {
+        Sequencer seq;
+        std::vector<std::tuple<int, int, float, float>> on;
+        const double bps = 2.0 / 48000.0;
+
+        for (int64_t b = 0; b < (int64_t) steps * 6000; b += 500)
+        {
+            seq.process (bank.data(), (int) bank.size(), 0, weave, timing, 0, 500, b * bps, bps,
+                         [&] (int o, int n, float v, float p) { if (v > 0.0f) on.emplace_back ((int) ((b + o) / 6000), n, v, p); });
+            seq.endBlock (500);
+        }
+
+        return on;
+    };
+    auto stepsOf = [] (const std::vector<std::tuple<int, int, float, float>>& on, int note = -1)
+    {
+        std::vector<int> v;
+        for (auto& [k, n, vel, p] : on) if (note < 0 || n == note) v.push_back (k);
+        return v;
+    };
+
+    // Conditions on a 4-step lane: 1:2 / 2:2 ratios, first, not first.
+    {
+        SeqPattern p;
+        p.lanes[0].length = p.lanes[1].length = p.lanes[2].length = p.lanes[3].length = 4;
+        p.lanes[0].steps[0] = { true }; p.lanes[0].steps[0].condition = SeqCondition::ratio; p.lanes[0].steps[0].condA = 1; p.lanes[0].steps[0].condB = 2;
+        p.lanes[1].steps[0] = { true }; p.lanes[1].steps[0].condition = SeqCondition::ratio; p.lanes[1].steps[0].condA = 2; p.lanes[1].steps[0].condB = 2;
+        p.lanes[2].steps[0] = { true }; p.lanes[2].steps[0].condition = SeqCondition::first;
+        p.lanes[3].steps[0] = { true }; p.lanes[3].steps[0].condition = SeqCondition::notFirst;
+        auto on = runBank ({ p }, {}, {}, 20);
+        CHECK ((stepsOf (on, 36) == std::vector<int> { 0, 8, 16 }));
+        CHECK ((stepsOf (on, 37) == std::vector<int> { 4, 12 }));
+        CHECK ((stepsOf (on, 38) == std::vector<int> { 0 }));
+        CHECK ((stepsOf (on, 39) == std::vector<int> { 4, 8, 12, 16 }));
+        CHECK (describe (p.lanes[0].steps[0]) == "1:2");
+    }
+
+    // Fill / not fill; previous / not previous follow a 50 % step exactly.
+    {
+        SeqPattern p;
+        p.lanes[0].steps[0] = { true }; p.lanes[0].steps[0].condition = SeqCondition::fill;
+        p.lanes[1].steps[0] = { true }; p.lanes[1].steps[0].condition = SeqCondition::notFill;
+        SeqTiming fill;
+        fill.fill = true;
+        CHECK (stepsOf (runBank ({ p }, {}, {}, 16), 36).empty() && stepsOf (runBank ({ p }, {}, fill, 16), 36).size() == 1);
+        CHECK (stepsOf (runBank ({ p }, {}, fill, 16), 37).empty());
+
+        SeqPattern q;
+        q.lanes[0].length = 4;
+        q.lanes[0].steps[0] = { true, 0.8f, 0.2f, 0.5f };
+        q.lanes[0].steps[2] = { true, 0.8f, 0.2f };
+        q.lanes[0].steps[2].condition = SeqCondition::previous;
+        auto on = stepsOf (runBank ({ q }, {}, {}, 400));
+        int cyclesWithFirst = 0, followers = 0, orphans = 0;
+        for (int c = 0; c < 100; ++c)
+        {
+            const auto a = std::count (on.begin(), on.end(), c * 4) > 0, b = std::count (on.begin(), on.end(), c * 4 + 2) > 0;
+            cyclesWithFirst += a ? 1 : 0;
+            followers += a && b ? 1 : 0;
+            orphans += ! a && b ? 1 : 0;
+        }
+        CHECK (cyclesWithFirst > 30 && cyclesWithFirst < 70 && followers == cyclesWithFirst && orphans == 0);
+        q.lanes[0].steps[2].condition = SeqCondition::notPrevious;
+        on = stepsOf (runBank ({ q }, {}, {}, 400));
+        followers = orphans = 0;
+        for (int c = 0; c < 100; ++c)
+        {
+            const auto a = std::count (on.begin(), on.end(), c * 4) > 0, b = std::count (on.begin(), on.end(), c * 4 + 2) > 0;
+            followers += a && b ? 1 : 0;
+            orphans += ! a && b ? 1 : 0;
+        }
+        CHECK (followers == 0 && orphans == 100 - cyclesWithFirst);
+    }
+
+    // Phrase Weaving: accents from pattern 1, fills from pattern 2 every 2 bars, pitch from pattern 3.
+    {
+        std::vector<SeqPattern> bank (4);
+        for (int i : { 0, 4, 8, 12 }) bank[0].lanes[0].steps[(size_t) i] = { true, 0.5f };
+        bank[1].lanes[0].steps[4] = { true };
+        for (int i = 0; i < 16; ++i) bank[2].lanes[0].steps[(size_t) i] = { true, 0.6f };
+        bank[3].lanes[0].steps[8] = { true, 0.8f, 0.5f, 1.0f, 1, 0.0f, 5.0f };
+        SeqWeave w;
+        w.accentSource = 1; w.accentAmount = 0.3f; w.fillSource = 2; w.fillEvery = 2; w.pitchSource = 3;
+        auto on = runBank (bank, w, {}, 64);
+        CHECK ((stepsOf (on).size() == 4 + 16 + 4 + 16));                       // bars 2 and 4 are fills
+        CHECK (std::get<2> (on[0]) == 0.5f && std::abs (std::get<2> (on[1]) - 0.8f) < 1e-6f && std::get<3> (on[2]) == 5.0f);
+        CHECK (std::get<0> (on[4]) == 16 && std::abs (std::get<2> (on[4]) - 0.6f) < 1e-6f);
+    }
+
+    using namespace pattern;
+
+    // Transformations.
+    {
+        SeqLane lane;
+        lane.length = 8;
+        lane.steps[0] = { true, 0.9f }; lane.steps[0].micro = 0.1f;
+        lane.steps[3] = { true, 0.4f };
+        auto r = lane;
+        reverse (r);
+        CHECK (r.steps[7].on && r.steps[7].micro == -0.1f && r.steps[4].on && ! r.steps[0].on);
+        auto t = lane;
+        rotate (t, 1);
+        CHECK (t.steps[1].on && t.steps[4].on && ! t.steps[0].on);
+        rotate (t, -1);
+        CHECK (t.steps[0].on && t.steps[3].on);
+        auto d = lane;
+        doubleLength (d);
+        CHECK (d.length == 16 && d.steps[8].on && d.steps[11].on);
+        halve (d);
+        CHECK (d.length == 8);
+        auto e = lane;
+        expand (e);
+        CHECK (e.length == 16 && e.steps[0].on && e.steps[6].on && ! e.steps[3].on);
+        contract (e);
+        bool same = e.length == lane.length;
+        for (int i = 0; i < 8; ++i) same = same && e.steps[(size_t) i].on == lane.steps[(size_t) i].on && e.steps[(size_t) i].velocity == lane.steps[(size_t) i].velocity;
+        CHECK (same);
+        auto v = lane;
+        applyVelocityCurve (v, VelocityCurve::rampUp, 1.0f);
+        CHECK (v.steps[0].velocity < v.steps[3].velocity && std::abs (v.steps[7].velocity - 1.0f) < 1e-6f);
+        applyProbabilityProfile (v, 0.4f);
+        CHECK (v.steps[4].probability == 1.0f && v.steps[3].probability == 0.4f);
+    }
+
+    // Genome: lossless round trip, recombination, readable description.
+    {
+        SeqLane a, b;
+        for (int i : { 0, 3, 6, 10 }) { a.steps[(size_t) i] = { true, 0.3f + 0.1f * (float) i }; a.steps[(size_t) i].pitch = (float) i; }
+        for (int i : { 0, 4, 8, 12 }) b.steps[(size_t) i] = { true, 1.0f };
+        auto ga = extract (a);
+        SeqLane round;
+        express (round, ga);
+        bool same = true;
+        for (int i = 0; i < 16; ++i)
+            same = same && round.steps[(size_t) i].on == a.steps[(size_t) i].on && round.steps[(size_t) i].velocity == a.steps[(size_t) i].velocity
+                   && round.steps[(size_t) i].pitch == a.steps[(size_t) i].pitch;
+        CHECK (same);
+
+        // Keep a's pitches and velocities, take b's rhythm: 4 events at b's positions, in a's contour order.
+        SeqLane c;
+        express (c, combine (ga, extract (b), rhythm));
+        CHECK (c.steps[4].on && c.steps[8].on && ! c.steps[3].on && c.steps[4].pitch == 3.0f && c.steps[12].pitch == 10.0f);
+        CHECK (describe (ga).rfind ("Rhythm x..x..x...x.....", 0) == 0);
+    }
+
+    // Mutation: only selected genes change, preserved steps never change, density bias, seeded and reproducible.
+    {
+        SeqLane base;
+        for (int i = 0; i < 16; i += 2) { base.steps[(size_t) i] = { true, 0.7f }; base.steps[(size_t) i].pitch = 0.0f; }
+        MutationSettings m;
+        m.intensity = 1.0f;
+        m.preservation = 0.0f;
+        m.genes = pitch;
+        auto x = base;
+        mutate (x, m);
+        bool rhythmKept = true, velocityKept = true, pitchChanged = false;
+        for (int i = 0; i < 16; ++i)
+        {
+            rhythmKept = rhythmKept && x.steps[(size_t) i].on == base.steps[(size_t) i].on;
+            velocityKept = velocityKept && x.steps[(size_t) i].velocity == base.steps[(size_t) i].velocity;
+            pitchChanged = pitchChanged || x.steps[(size_t) i].pitch != 0.0f;
+        }
+        CHECK (rhythmKept && velocityKept && pitchChanged);
+
+        auto y = base;
+        mutate (y, m);
+        bool reproducible = true;
+        for (int i = 0; i < 16; ++i) reproducible = reproducible && y.steps[(size_t) i].pitch == x.steps[(size_t) i].pitch;
+        CHECK (reproducible);
+        m.seed = 2;
+        auto z = base;
+        mutate (z, m);
+        bool differs = false;
+        for (int i = 0; i < 16; ++i) differs = differs || z.steps[(size_t) i].pitch != x.steps[(size_t) i].pitch;
+        CHECK (differs);
+
+        m.preservation = 1.0f;
+        auto kept = base;
+        mutate (kept, m);
+        bool untouched = true;
+        for (int i = 0; i < 16; ++i) untouched = untouched && kept.steps[(size_t) i].pitch == 0.0f;
+        CHECK (untouched);
+
+        auto count = [] (const SeqLane& l) { int n = 0; for (int i = 0; i < 16; ++i) n += l.steps[(size_t) i].on ? 1 : 0; return n; };
+        m.preservation = 0.0f;
+        m.genes = rhythm;
+        m.densityBias = 1.0f;
+        auto denser = base;
+        mutate (denser, m);
+        m.densityBias = -1.0f;
+        auto sparser = base;
+        mutate (sparser, m);
+        CHECK (count (denser) > 8 && count (sparser) < 8);
+    }
+}
+
 static void keyTests()
 {
     auto print = [] (const char* name, const KeyEstimate& k)
@@ -834,6 +1035,7 @@ int main()
     arpTests();
     arpGenerativeTests();
     sequencerTests();
+    advancedSequencingTests();
     keyTests();
     std::printf (failures == 0 ? "All core tests passed\n" : "%d failure(s)\n", failures);
     return failures == 0 ? EXIT_SUCCESS : EXIT_FAILURE;

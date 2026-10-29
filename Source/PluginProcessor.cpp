@@ -54,6 +54,12 @@ NeuroMPCProcessor::NeuroMPCProcessor()
     seqPatternParam = apvts.getRawParameterValue (ParamIDs::seqPattern);
     seqRateParam    = apvts.getRawParameterValue (ParamIDs::seqRate);
     seqSwingParam   = apvts.getRawParameterValue (ParamIDs::seqSwing);
+    seqFillParam           = apvts.getRawParameterValue (ParamIDs::seqFill);
+    weaveAccentParam       = apvts.getRawParameterValue (ParamIDs::weaveAccent);
+    weaveAccentAmountParam = apvts.getRawParameterValue (ParamIDs::weaveAccentAmount);
+    weaveFillParam         = apvts.getRawParameterValue (ParamIDs::weaveFill);
+    weaveFillEveryParam    = apvts.getRawParameterValue (ParamIDs::weaveFillEvery);
+    weavePitchParam        = apvts.getRawParameterValue (ParamIDs::weavePitch);
     rtSeq.publish (std::make_shared<const SeqBank> (seqPatterns));
     publishPads();
     startTimerHz (20);
@@ -161,7 +167,21 @@ juce::AudioProcessorValueTreeState::ParameterLayout NeuroMPCProcessor::createLay
                                                 StringArray { "1/4", "1/8", "1/8T", "1/16", "1/16T", "1/32" }, 3),
         std::make_unique<AudioParameterFloat> (ParameterID { ParamIDs::seqSwing, 1 }, "Sequencer Swing",
                                                NormalisableRange<float> (50.0f, 75.0f, 0.5f), 50.0f,
-                                               AudioParameterFloatAttributes().withLabel ("%"))
+                                               AudioParameterFloatAttributes().withLabel ("%")),
+        std::make_unique<AudioParameterBool> (ParameterID { ParamIDs::seqFill, 1 }, "Sequencer Fill", false),
+        std::make_unique<AudioParameterInt> (ParameterID { ParamIDs::weaveAccent, 1 }, "Weave Accents From", 0, numSeqPatterns, 0,
+                                             AudioParameterIntAttributes().withStringFromValueFunction (
+                                                 [] (int v, int) { return v == 0 ? String ("none") : "pattern " + String (v); })),
+        std::make_unique<AudioParameterFloat> (ParameterID { ParamIDs::weaveAccentAmount, 1 }, "Weave Accent Amount",
+                                               NormalisableRange<float> (0.0f, 100.0f, 1.0f), 30.0f,
+                                               AudioParameterFloatAttributes().withLabel ("%")),
+        std::make_unique<AudioParameterInt> (ParameterID { ParamIDs::weaveFill, 1 }, "Weave Fills From", 0, numSeqPatterns, 0,
+                                             AudioParameterIntAttributes().withStringFromValueFunction (
+                                                 [] (int v, int) { return v == 0 ? String ("none") : "pattern " + String (v); })),
+        std::make_unique<AudioParameterInt> (ParameterID { ParamIDs::weaveFillEvery, 1 }, "Weave Fill Every (bars)", 1, 16, 4),
+        std::make_unique<AudioParameterInt> (ParameterID { ParamIDs::weavePitch, 1 }, "Weave Pitch From", 0, numSeqPatterns, 0,
+                                             AudioParameterIntAttributes().withStringFromValueFunction (
+                                                 [] (int v, int) { return v == 0 ? String ("none") : "pattern " + String (v); }))
     };
 }
 
@@ -386,8 +406,15 @@ void NeuroMPCProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
             timing.stepBeats = stepBeats[juce::jlimit (0, 5, (int) seqRateParam->load())];
             timing.swing = seqSwingParam->load() / 100.0f;
             timing.seed = (uint32_t) arpSeedParam->load();
-            const auto& pattern = (*bankOfPatterns)[(size_t) juce::jlimit (0, numSeqPatterns - 1, (int) seqPatternParam->load() - 1)];
-            sequencer.process (pattern, timing, 0, numSamples, beat, beatsPerSample, seqSink);
+            timing.fill = seqFillParam->load() > 0.5f;
+            neuro::SeqWeave weave;
+            weave.accentSource = (int) weaveAccentParam->load() - 1;
+            weave.accentAmount = weaveAccentAmountParam->load() / 100.0f;
+            weave.fillSource = (int) weaveFillParam->load() - 1;
+            weave.fillEvery = (int) weaveFillEveryParam->load();
+            weave.pitchSource = (int) weavePitchParam->load() - 1;
+            sequencer.process (bankOfPatterns->data(), numSeqPatterns, (int) seqPatternParam->load() - 1, weave, timing,
+                               0, numSamples, beat, beatsPerSample, seqSink);
             seqPlayStep.store (neuro::Sequencer::stepAt (beat, timing.stepBeats));
 
             if (mode == 2)
@@ -637,10 +664,56 @@ void NeuroMPCProcessor::stopAudition (int tag)
     pushUiNote (tag, 0.0f, -1);
 }
 
-void NeuroMPCProcessor::editSeqPattern (int index, const std::function<void (neuro::SeqPattern&)>& edit)
+void NeuroMPCProcessor::editSeqPattern (int index, const std::function<void (neuro::SeqPattern&)>& edit, Undo undo)
 {
-    edit (seqPatterns[(size_t) juce::jlimit (0, numSeqPatterns - 1, index)]);
+    const auto i = (size_t) juce::jlimit (0, numSeqPatterns - 1, index);
+    const auto now = juce::Time::getMillisecondCounterHiRes();
+
+    if (undo == Undo::always || (undo == Undo::record && now - seqLastUndoTime[i] > 400.0))
+    {
+        seqUndo[i].push_back (seqPatterns[i]);
+
+        if (seqUndo[i].size() > 64)
+            seqUndo[i].erase (seqUndo[i].begin());
+
+        seqRedo[i].clear();
+    }
+
+    if (undo != Undo::none)
+        seqLastUndoTime[i] = now;
+
+    edit (seqPatterns[i]);
     rtSeq.publish (std::make_shared<const SeqBank> (seqPatterns));
+}
+
+bool NeuroMPCProcessor::undoSeqPattern (int index)
+{
+    const auto i = (size_t) juce::jlimit (0, numSeqPatterns - 1, index);
+
+    if (seqUndo[i].empty())
+        return false;
+
+    seqRedo[i].push_back (seqPatterns[i]);
+    seqPatterns[i] = seqUndo[i].back();
+    seqUndo[i].pop_back();
+    seqLastUndoTime[i] = 0.0;
+    rtSeq.publish (std::make_shared<const SeqBank> (seqPatterns));
+    return true;
+}
+
+bool NeuroMPCProcessor::redoSeqPattern (int index)
+{
+    const auto i = (size_t) juce::jlimit (0, numSeqPatterns - 1, index);
+
+    if (seqRedo[i].empty())
+        return false;
+
+    seqUndo[i].push_back (seqPatterns[i]);
+    seqPatterns[i] = seqRedo[i].back();
+    seqRedo[i].pop_back();
+    seqLastUndoTime[i] = 0.0;
+    rtSeq.publish (std::make_shared<const SeqBank> (seqPatterns));
+    return true;
 }
 
 void NeuroMPCProcessor::editArpProgram (const std::function<void (neuro::ArpProgram&)>& edit)
@@ -651,6 +724,12 @@ void NeuroMPCProcessor::editArpProgram (const std::function<void (neuro::ArpProg
     seqPatternParam = apvts.getRawParameterValue (ParamIDs::seqPattern);
     seqRateParam    = apvts.getRawParameterValue (ParamIDs::seqRate);
     seqSwingParam   = apvts.getRawParameterValue (ParamIDs::seqSwing);
+    seqFillParam           = apvts.getRawParameterValue (ParamIDs::seqFill);
+    weaveAccentParam       = apvts.getRawParameterValue (ParamIDs::weaveAccent);
+    weaveAccentAmountParam = apvts.getRawParameterValue (ParamIDs::weaveAccentAmount);
+    weaveFillParam         = apvts.getRawParameterValue (ParamIDs::weaveFill);
+    weaveFillEveryParam    = apvts.getRawParameterValue (ParamIDs::weaveFillEvery);
+    weavePitchParam        = apvts.getRawParameterValue (ParamIDs::weavePitch);
     rtSeq.publish (std::make_shared<const SeqBank> (seqPatterns));
 }
 
@@ -955,6 +1034,14 @@ void NeuroMPCProcessor::getStateInformation (juce::MemoryBlock& dest)
                 t.setProperty ("ratchet", st.ratchet, nullptr);
                 t.setProperty ("micro", st.micro, nullptr);
                 t.setProperty ("pitch", st.pitch, nullptr);
+
+                if (st.condition != neuro::SeqCondition::always)
+                {
+                    t.setProperty ("cond", (int) st.condition, nullptr);
+                    t.setProperty ("condA", st.condA, nullptr);
+                    t.setProperty ("condB", st.condB, nullptr);
+                }
+
                 lt.appendChild (t, nullptr);
             }
 
@@ -1012,6 +1099,9 @@ void NeuroMPCProcessor::setStateInformation (const void* data, int size)
                     st.ratchet = juce::jlimit (1, 4, (int) t.getProperty ("ratchet", 1));
                     st.micro = juce::jlimit (-0.5f, 0.5f, (float) t.getProperty ("micro", 0.0f));
                     st.pitch = juce::jlimit (-24.0f, 24.0f, (float) t.getProperty ("pitch", 0.0f));
+                    st.condition = (neuro::SeqCondition) juce::jlimit (0, 7, (int) t.getProperty ("cond", 0));
+                    st.condA = juce::jlimit (1, 16, (int) t.getProperty ("condA", 1));
+                    st.condB = juce::jlimit (1, 16, (int) t.getProperty ("condB", 2));
                 }
             }
         }

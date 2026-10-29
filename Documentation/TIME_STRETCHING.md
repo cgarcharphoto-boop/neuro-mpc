@@ -28,7 +28,7 @@ These come from `neuro_engine_tests` on an M-series Mac, using a 1 s stereo 440 
 | ×0.50 | 24000 (24000) | 440.0 Hz | 0.507 | 0.652 | 0.0001 | 3.7 ms |
 | ×1.50 | 72000 (72000) | 440.0 Hz | 0.502 | 0.539 | 0.0002 | 7.8 ms |
 | ×2.00 | 96000 (96000) | 440.0 Hz | 0.500 | 0.605 | 0.0004 | 10.0 ms |
-| ×4.00 | 192000 (192000) | 440.8 Hz | 0.521 | 0.565 | 0.0002 | 20.0 ms |
+| ×4.00 | 192000 (192000) | 440.8 Hz | 0.526 | 0.565 | 0.0002 | 20.0 ms |
 
 Transients (hits at 0.25/0.5/0.75 s, stretched ×2, expected at 24000/48000/72000):
 - With preserve off, onsets are detected at 17664, 41728, 47872, 65792 and 71936: each hit gets a pre-echo about 128 ms early.
@@ -36,7 +36,7 @@ Transients (hits at 0.25/0.5/0.75 s, stretched ×2, expected at 24000/48000/7200
 
 ## Known limitations
 - **Edges:** a signal that switches on or off abruptly at full level rings by up to about +2.3 dB at the switch. This is inherent to STFT processing.
-- **Above ×2:** the algorithm randomises phases, which gives about ±5% amplitude ripple and a slightly diffuse sound.
+- **Above ×2:** the algorithm randomises phases, which gives about ±5% amplitude ripple and a slightly diffuse sound. The randomness is seeded from the region, so identical settings always render identical audio (verified by test).
 - **Short slices:** renders of slices under ~120 ms are dominated by the window. Very short drum hits can sound softened; resampling playback (stretch = 1) is exact.
 - **Joins:** with Preserve transients on, segment joins have no crossfade. Each join sits at a detected onset, which usually masks it.
 - **Not yet done:** pitch-preserving *pitch shift* is Phase 8. Comparative listening tests against commercial stretchers have not been done, so no claim of superior quality is made.

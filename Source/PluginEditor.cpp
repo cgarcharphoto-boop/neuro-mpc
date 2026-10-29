@@ -166,7 +166,7 @@ NeuroMPCEditor::NeuroMPCEditor (NeuroMPCProcessor& p) : AudioProcessorEditor (p)
 
     bankButtons[0].setToggleState (true, juce::dontSendNotification);
 
-    for (auto* tab : { &sliceTab, &padTab, &arpTab, &genTab, &seqTab })
+    for (auto* tab : { &sliceTab, &padTab, &arpTab, &genTab, &seqTab, &evolveTab })
     {
         tab->setRadioGroupId (2);
         tab->setClickingTogglesState (true);
@@ -179,6 +179,170 @@ NeuroMPCEditor::NeuroMPCEditor (NeuroMPCProcessor& p) : AudioProcessorEditor (p)
     arpTab.onClick   = [this] { showPanel (Panel::arp); };
     genTab.onClick   = [this] { showPanel (Panel::gen); };
     seqTab.onClick   = [this] { showPanel (Panel::seq); };
+    evolveTab.onClick = [this] { showPanel (Panel::evolve); };
+
+    // ---- SEQ additions: step condition, fill, undo ----
+    stepCondition.addItemList ({ "Cond: always", "Cond: 1:2", "Cond: 2:2", "Cond: 1:3", "Cond: 2:3", "Cond: 3:3", "Cond: 1:4", "Cond: 2:4",
+                                 "Cond: 3:4", "Cond: 4:4", "Cond: first", "Cond: not first", "Cond: fill", "Cond: not fill",
+                                 "Cond: if previous", "Cond: if not previous" }, 1);
+    stepCondition.setTooltip ("Trig condition for the selected step (A:B = plays on lane cycle A of every B)");
+    stepCondition.onChange = [this]
+    {
+        static constexpr int ratios[][2] { { 1, 2 }, { 2, 2 }, { 1, 3 }, { 2, 3 }, { 3, 3 }, { 1, 4 }, { 2, 4 }, { 3, 4 }, { 4, 4 } };
+        const auto id = stepCondition.getSelectedId();
+        editSelectedSeqStep ([id] (auto& st)
+        {
+            using C = neuro::SeqCondition;
+            st.condition = id == 1 ? C::always : id <= 10 ? C::ratio
+                         : (C) ((int) C::first + (id - 11));
+            if (id >= 2 && id <= 10) { st.condA = ratios[id - 2][0]; st.condB = ratios[id - 2][1]; }
+        });
+    };
+    buttonAttachments.push_back (std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (proc.apvts, ParamIDs::seqFill, seqFill));
+    seqFill.setTooltip ("Fill: steps with fill / not-fill conditions follow this switch");
+    seqUndo.onClick = [this] { proc.undoSeqPattern (proc.getSelectedSeqPattern()); updateSeqPanel(); };
+    seqRedo.onClick = [this] { proc.redoSeqPattern (proc.getSelectedSeqPattern()); updateSeqPanel(); };
+
+    // ---- Evolve panel ----
+    for (auto* c : evolvePanelComponents())
+        addAndMakeVisible (c);
+
+    for (auto [label, text] : { std::pair { &evolveTitle, "TRANSFORM" }, { &mutateTitle, "MUTATE" }, { &weaveTitle, "WEAVE" } })
+    {
+        label->setText (text, juce::dontSendNotification);
+        label->setFont (juce::FontOptions (13.0f, juce::Font::bold));
+    }
+
+    genomeInfo.setJustificationType (juce::Justification::topLeft);
+    genomeInfo.setColour (juce::Label::backgroundColourId, panel);
+    evolveScope.addItemList ({ "Selected lane", "All lanes" }, 1);
+    evolveScope.setSelectedId (1, juce::dontSendNotification);
+    velocityCurve.addItemList ({ "Ramp up", "Ramp down", "Downbeats", "Offbeats", "Flat" }, 1);
+    velocityCurve.setSelectedId (3, juce::dontSendNotification);
+
+    static constexpr auto always = NeuroMPCProcessor::Undo::always;
+    xReverse.onClick  = [this] { forEachScopedLane ([] (auto& l, int) { neuro::pattern::reverse (l); }, always); };
+    xLeft.onClick     = [this] { forEachScopedLane ([] (auto& l, int) { neuro::pattern::rotate (l, -1); }, always); };
+    xRight.onClick    = [this] { forEachScopedLane ([] (auto& l, int) { neuro::pattern::rotate (l, 1); }, always); };
+    xDouble.onClick   = [this] { forEachScopedLane ([] (auto& l, int) { neuro::pattern::doubleLength (l); }, always); };
+    xHalve.onClick    = [this] { forEachScopedLane ([] (auto& l, int) { neuro::pattern::halve (l); }, always); };
+    xExpand.onClick   = [this] { forEachScopedLane ([] (auto& l, int) { neuro::pattern::expand (l); }, always); };
+    xContract.onClick = [this] { forEachScopedLane ([] (auto& l, int) { neuro::pattern::contract (l); }, always); };
+    curveDepth.setRange (0.0, 1.0, 0.01);
+    curveDepth.setValue (1.0, juce::dontSendNotification);
+    applyCurve.onClick = [this]
+    {
+        const auto curve = (neuro::pattern::VelocityCurve) (velocityCurve.getSelectedId() - 1);
+        forEachScopedLane ([curve, d = (float) curveDepth.getValue()] (auto& l, int) { neuro::pattern::applyVelocityCurve (l, curve, d); }, always);
+    };
+    offbeatChance.setRange (0, 100, 1);
+    offbeatChance.setValue (60, juce::dontSendNotification);
+    offbeatChance.setTextValueSuffix (" %");
+    applyProfile.onClick = [this]
+    {
+        forEachScopedLane ([chance = (float) offbeatChance.getValue() / 100.0f] (auto& l, int) { neuro::pattern::applyProbabilityProfile (l, chance); }, always);
+    };
+
+    const char* geneNames[] { "Rhythm", "Velocity", "Pitch", "Groove", "Chance", "Ratchet", "Gate" };
+
+    for (size_t g = 0; g < geneToggles.size(); ++g)
+    {
+        geneToggles[g].setButtonText (geneNames[g]);
+        geneToggles[g].setToggleState (g < 3, juce::dontSendNotification);
+        geneToggles[g].setTooltip ("Genes Mutate may change and Take genes copies; unticked genes are preserved exactly");
+    }
+
+    for (auto [slider, lo, hi, step, value] : std::initializer_list<std::tuple<juce::Slider*, double, double, double, double>> {
+             { &mutIntensity, 0, 100, 1, 30 }, { &mutPreserve, 0, 100, 1, 50 }, { &mutDensity, -100, 100, 1, 0 },
+             { &mutPitch, 0, 24, 1, 7 }, { &mutVelocity, 0, 100, 1, 30 }, { &mutTiming, 0, 50, 1, 15 }, { &mutSeed, 1, 9999, 1, 1 } })
+    {
+        slider->setRange (lo, hi, step);
+        slider->setValue (value, juce::dontSendNotification);
+    }
+
+    mutateButton.setTooltip ("Mutate the selected genes (seeded); the seed then advances so the next click gives a new variation");
+    mutateButton.onClick = [this]
+    {
+        const auto index = proc.getSelectedSeqPattern();
+        compareSnapshot = proc.getSeqPattern (index);
+        compareIndex = index;
+        neuro::pattern::MutationSettings m;
+        m.intensity = (float) mutIntensity.getValue() / 100.0f;
+        m.preservation = (float) mutPreserve.getValue() / 100.0f;
+        m.densityBias = (float) mutDensity.getValue() / 100.0f;
+        m.pitchRange = (int) mutPitch.getValue();
+        m.velocityRange = (float) mutVelocity.getValue() / 100.0f;
+        m.timingRange = (float) mutTiming.getValue() / 100.0f;
+        m.seed = (uint32_t) mutSeed.getValue();
+        m.genes = 0;
+
+        for (size_t g = 0; g < geneToggles.size(); ++g)
+            m.genes |= geneToggles[g].getToggleState() ? (1u << g) : 0u;
+
+        forEachScopedLane ([&m] (auto& l, int lane) { auto lm = m; lm.seed = m.seed * 131u + (uint32_t) lane; neuro::pattern::mutate (l, lm); }, always);
+        mutSeed.setValue (juce::jlimit (1.0, 9999.0, mutSeed.getValue() + 1.0), juce::dontSendNotification);
+        compareButton.setButtonText ("A/B: B");
+    };
+    compareButton.setTooltip ("Compare: swap between the pattern before the last mutation (A) and after (B)");
+    compareButton.onClick = [this]
+    {
+        if (! compareSnapshot || compareIndex != proc.getSelectedSeqPattern())
+            return;
+
+        auto current = proc.getSeqPattern (compareIndex);
+        proc.editSeqPattern (compareIndex, [this] (auto& pat) { pat = *compareSnapshot; }, NeuroMPCProcessor::Undo::none);
+        compareSnapshot = current;
+        compareButton.setButtonText (compareButton.getButtonText() == "A/B: B" ? "A/B: A" : "A/B: B");
+    };
+
+    for (int i = 1; i <= NeuroMPCProcessor::numSeqPatterns; ++i)
+        donorPattern.addItem ("from pattern " + juce::String (i), i);
+
+    donorPattern.setSelectedId (2, juce::dontSendNotification);
+    combineButton.setTooltip ("Pattern Genome: take the ticked genes from another pattern (lane by lane), keep the rest");
+    combineButton.onClick = [this]
+    {
+        const auto& donor = proc.getSeqPattern (donorPattern.getSelectedId() - 1);
+        uint32_t genes = 0;
+
+        for (size_t g = 0; g < geneToggles.size(); ++g)
+            genes |= geneToggles[g].getToggleState() ? (1u << g) : 0u;
+
+        forEachScopedLane ([&donor, genes] (auto& l, int lane)
+        {
+            neuro::pattern::express (l, neuro::pattern::combine (neuro::pattern::extract (l),
+                                                                 neuro::pattern::extract (donor.lanes[(size_t) lane]), genes));
+        }, always);
+    };
+    evolveUndo.onClick = [this] { proc.undoSeqPattern (proc.getSelectedSeqPattern()); updateEvolvePanel(); };
+    evolveRedo.onClick = [this] { proc.redoSeqPattern (proc.getSelectedSeqPattern()); updateEvolvePanel(); };
+
+    for (auto* box : { &weaveAccent, &weaveFill, &weavePitch })
+    {
+        box->addItem (box == &weaveAccent ? "Accents: none" : box == &weaveFill ? "Fills: none" : "Pitch: none", 1);
+
+        for (int i = 1; i <= NeuroMPCProcessor::numSeqPatterns; ++i)
+            box->addItem ((box == &weaveAccent ? "Accents from " : box == &weaveFill ? "Fills from " : "Pitch from ") + juce::String (i), i + 1);
+    }
+
+    for (auto [box, id] : std::initializer_list<std::pair<juce::ComboBox*, const char*>> {
+             { &weaveAccent, ParamIDs::weaveAccent }, { &weaveFill, ParamIDs::weaveFill }, { &weavePitch, ParamIDs::weavePitch } })
+        comboAttachments.push_back (std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment> (proc.apvts, id, *box));
+
+    sliderAttachments.push_back (std::make_unique<SliderAttachment> (proc.apvts, ParamIDs::weaveAccentAmount, weaveAmount));
+    sliderAttachments.push_back (std::make_unique<SliderAttachment> (proc.apvts, ParamIDs::weaveFillEvery, weaveEvery));
+
+    for (auto [slider, name] : std::initializer_list<std::pair<juce::Slider*, const char*>> {
+             { &curveDepth, "Depth" }, { &offbeatChance, "Offbeat" }, { &mutIntensity, "Intensity" }, { &mutPreserve, "Preserve" },
+             { &mutDensity, "Density" }, { &mutPitch, "Pitch +/-" }, { &mutVelocity, "Vel +/-" }, { &mutTiming, "Time +/-" },
+             { &mutSeed, "Seed" }, { &weaveAmount, "Amount" }, { &weaveEvery, "Every" } })
+    {
+        slider->setTextBoxStyle (juce::Slider::TextBoxRight, false, 48, 20);
+        auto label = std::make_unique<juce::Label> (name, name);
+        label->setFont (juce::FontOptions (11.0f));
+        label->attachToComponent (slider, true);
+        knobLabels.push_back (std::move (label));
+    }
 
     // ---- Sequencer panel ----
     for (auto* c : seqPanelComponents())
@@ -755,12 +919,54 @@ std::vector<juce::Component*> NeuroMPCEditor::seqPanelComponents()
 {
     std::vector<juce::Component*> list { &seqGrid, &seqTitle, &seqName, &seqInfo, &seqPatternBox, &seqModeBox, &seqRateBox,
                                          &laneNote, &seqSwing, &stepVelocity, &stepGate, &stepChance, &stepRatchet, &stepMicro,
-                                         &stepPitch, &laneLength, &seqDuplicate, &seqClear, &lanePageButton };
+                                         &stepPitch, &laneLength, &seqDuplicate, &seqClear, &lanePageButton, &seqUndo, &seqRedo,
+                                         &seqFill, &stepCondition };
 
     for (auto& b : stepPageButtons)
         list.push_back (&b);
 
     return list;
+}
+
+std::vector<juce::Component*> NeuroMPCEditor::evolvePanelComponents()
+{
+    std::vector<juce::Component*> list { &evolveTitle, &mutateTitle, &weaveTitle, &genomeInfo, &evolveScope, &velocityCurve,
+                                         &donorPattern, &weaveAccent, &weaveFill, &weavePitch, &xReverse, &xLeft, &xRight, &xDouble,
+                                         &xHalve, &xExpand, &xContract, &applyCurve, &applyProfile, &mutateButton, &compareButton,
+                                         &combineButton, &evolveUndo, &evolveRedo, &curveDepth, &offbeatChance, &mutIntensity,
+                                         &mutPreserve, &mutDensity, &mutPitch, &mutVelocity, &mutTiming, &mutSeed, &weaveAmount,
+                                         &weaveEvery };
+
+    for (auto& t : geneToggles)
+        list.push_back (&t);
+
+    return list;
+}
+
+// Applies an edit to the selected lane or to every active lane of the selected pattern, as one undo step.
+void NeuroMPCEditor::forEachScopedLane (const std::function<void (neuro::SeqLane&, int)>& fn, NeuroMPCProcessor::Undo undo)
+{
+    const auto all = evolveScope.getSelectedId() == 2;
+    proc.editSeqPattern (proc.getSelectedSeqPattern(), [&] (auto& pat)
+    {
+        for (int l = 0; l < neuro::SeqPattern::maxLanes; ++l)
+            if (all ? l < pat.numLanes : l == seqGrid.selectedLane)
+                fn (pat.lanes[(size_t) l], l);
+    }, undo);
+
+    updateEvolvePanel();
+}
+
+void NeuroMPCEditor::updateEvolvePanel()
+{
+    const auto index = proc.getSelectedSeqPattern();
+    const auto& lane = proc.getSeqPattern (index).lanes[(size_t) seqGrid.selectedLane];
+    genomeInfo.setText ("Pattern " + juce::String (index + 1) + ", lane " + juce::String (seqGrid.selectedLane + 1) + " genome:\n"
+                            + juce::String (neuro::pattern::describe (neuro::pattern::extract (lane))),
+                        juce::dontSendNotification);
+    evolveUndo.setEnabled (proc.canUndoSeqPattern (index));
+    evolveRedo.setEnabled (proc.canRedoSeqPattern (index));
+    compareButton.setEnabled (compareSnapshot.has_value() && compareIndex == index);
 }
 
 void NeuroMPCEditor::editSelectedSeqStep (const std::function<void (neuro::SeqStep&)>& fn)
@@ -787,6 +993,28 @@ void NeuroMPCEditor::updateSeqPanel()
             slider->setValue (value, juce::dontSendNotification);
 
     laneNote.setSelectedId (lane.note + 1, juce::dontSendNotification);
+
+    {
+        using C = neuro::SeqCondition;
+        int id = 1;
+
+        if (st.condition == C::ratio)
+        {
+            static constexpr int ratios[][2] { { 1, 2 }, { 2, 2 }, { 1, 3 }, { 2, 3 }, { 3, 3 }, { 1, 4 }, { 2, 4 }, { 3, 4 }, { 4, 4 } };
+            for (int r = 0; r < 9; ++r)
+                if (ratios[r][0] == st.condA && ratios[r][1] == st.condB)
+                    id = r + 2;
+        }
+        else if (st.condition != C::always)
+        {
+            id = 11 + ((int) st.condition - (int) C::first);
+        }
+
+        stepCondition.setSelectedId (id, juce::dontSendNotification);
+    }
+
+    seqUndo.setEnabled (proc.canUndoSeqPattern (proc.getSelectedSeqPattern()));
+    seqRedo.setEnabled (proc.canRedoSeqPattern (proc.getSelectedSeqPattern()));
 
     const auto playStep = proc.getSeqPlayStep();
     seqInfo.setText ("Lane " + juce::String (seqGrid.selectedLane + 1) + ", step " + juce::String (seqGrid.selectedStep + 1)
@@ -829,19 +1057,22 @@ void NeuroMPCEditor::showPanel (Panel p)
     for (auto* c : arpPanelComponents())   c->setVisible (p == Panel::arp);
     for (auto* c : genPanelComponents())   c->setVisible (p == Panel::gen);
     for (auto* c : seqPanelComponents())   c->setVisible (p == Panel::seq);
+    for (auto* c : evolvePanelComponents()) c->setVisible (p == Panel::evolve);
 
-    info.setVisible (p != Panel::gen && p != Panel::seq); // these panels use the info area too
+    info.setVisible (p == Panel::slice || p == Panel::pad || p == Panel::arp); // the others use the info area too
 
     sliceTab.setToggleState (p == Panel::slice, juce::dontSendNotification);
     padTab.setToggleState (p == Panel::pad, juce::dontSendNotification);
     arpTab.setToggleState (p == Panel::arp, juce::dontSendNotification);
     genTab.setToggleState (p == Panel::gen, juce::dontSendNotification);
     seqTab.setToggleState (p == Panel::seq, juce::dontSendNotification);
+    evolveTab.setToggleState (p == Panel::evolve, juce::dontSendNotification);
 
     if (p == Panel::pad) updatePadPanel();
     if (p == Panel::arp) updateArpPanel();
     if (p == Panel::gen) updateGenPanel();
     if (p == Panel::seq) updateSeqPanel();
+    if (p == Panel::evolve) updateEvolvePanel();
 }
 
 void NeuroMPCEditor::updateArpPanel()
@@ -1024,6 +1255,7 @@ void NeuroMPCEditor::timerCallback()
     if (activePanel == Panel::arp) updateArpPanel();
     if (activePanel == Panel::arp) gesturePad.repaint();
     if (activePanel == Panel::seq) updateSeqPanel();
+    if (activePanel == Panel::evolve) updateEvolvePanel();
 
     updateInfo();
     updateSlicePanel();
@@ -1109,6 +1341,7 @@ void NeuroMPCEditor::resized()
     arpTab.setBounds (tabs.removeFromLeft (70));
     genTab.setBounds (tabs.removeFromLeft (70));
     seqTab.setBounds (tabs.removeFromLeft (70));
+    evolveTab.setBounds (tabs.removeFromLeft (76));
     bottom.removeFromTop (6);
     const auto panelArea = bottom.removeFromTop (142);
 
@@ -1240,6 +1473,11 @@ void NeuroMPCEditor::resized()
 
         r1.removeFromLeft (8);
         lanePageButton.setBounds (r1.removeFromLeft (90));
+        r1.removeFromLeft (8);
+        seqFill.setBounds (r1.removeFromLeft (56));
+        seqUndo.setBounds (r1.removeFromLeft (52));
+        r1.removeFromLeft (4);
+        seqRedo.setBounds (r1.removeFromLeft (52));
         r1.removeFromLeft (12);
         seqInfo.setBounds (r1);
 
@@ -1261,7 +1499,78 @@ void NeuroMPCEditor::resized()
 
         laneNote.setBounds (laneRow.removeFromLeft (190));
         laneRow.removeFromLeft (56);
-        laneLength.setBounds (laneRow.removeFromLeft (220));
+        laneLength.setBounds (laneRow.removeFromLeft (200));
+        laneRow.removeFromLeft (12);
+        stepCondition.setBounds (laneRow.removeFromLeft (190));
+    }
+
+    // Evolve panel: also uses the info area.
+    {
+        auto ep = panelArea.withBottom (bottom.getBottom());
+        auto rowOf = [&ep] (int gap = 6) { ep.removeFromTop (gap); return ep.removeFromTop (24); };
+        auto place = [] (juce::Rectangle<int>& r, juce::Component& c, int w, int gap = 6) { c.setBounds (r.removeFromLeft (w)); r.removeFromLeft (gap); };
+
+        auto r0 = ep.removeFromTop (24);
+        place (r0, evolveTitle, 92);
+        place (r0, evolveScope, 120);
+
+        for (auto* b : { &xReverse, &xLeft, &xRight, &xDouble, &xHalve, &xExpand, &xContract })
+            place (r0, *b, b == &xDouble || b == &xHalve ? 40 : 66, 4);
+
+        r0.removeFromLeft (8);
+        place (r0, evolveUndo, 52, 4);
+        place (r0, evolveRedo, 52);
+
+        auto r1 = rowOf();
+        place (r1, velocityCurve, 120);
+        r1.removeFromLeft (44);
+        place (r1, curveDepth, 130);
+        place (r1, applyCurve, 54, 24);
+        r1.removeFromLeft (52);
+        place (r1, offbeatChance, 150);
+        place (r1, applyProfile, 54);
+
+        auto r2 = rowOf (10);
+        place (r2, mutateTitle, 92);
+
+        for (auto& t : geneToggles)
+            place (r2, t, 82, 2);
+
+        for (auto sliders : { std::array<juce::Slider*, 4> { &mutIntensity, &mutPreserve, &mutDensity, nullptr },
+                              std::array<juce::Slider*, 4> { &mutPitch, &mutVelocity, &mutTiming, &mutSeed } })
+        {
+            auto r = rowOf();
+            const auto w = (r.getWidth() - 4 * 60) / 4;
+
+            for (auto* sld : sliders)
+            {
+                r.removeFromLeft (60);
+                auto slot = r.removeFromLeft (w);
+
+                if (sld != nullptr)
+                    sld->setBounds (slot);
+            }
+        }
+
+        auto r5 = rowOf();
+        r5.removeFromLeft (92);
+        place (r5, mutateButton, 80);
+        place (r5, compareButton, 70, 24);
+        place (r5, donorPattern, 140);
+        place (r5, combineButton, 96);
+
+        auto r6 = rowOf (10);
+        place (r6, weaveTitle, 92);
+        place (r6, weaveAccent, 150);
+        r6.removeFromLeft (50);
+        place (r6, weaveAmount, 120, 12);
+        place (r6, weaveFill, 130);
+        r6.removeFromLeft (40);
+        place (r6, weaveEvery, 110, 12);
+        place (r6, weavePitch, 130);
+
+        ep.removeFromTop (8);
+        genomeInfo.setBounds (ep);
     }
 
     auto ap = panelArea;

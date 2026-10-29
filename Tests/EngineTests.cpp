@@ -198,6 +198,16 @@ static void stretchQualityTests()
         CHECK (err < 0.02 * peak);
     }
 
+    // Deterministic renders: identical settings give identical audio, including the phase-randomised range above x2.
+    {
+        auto a1 = neuro::renderStretch (tone, 0, tone.getNumSamples(), sr, 4.0f, false);
+        auto a2 = neuro::renderStretch (tone, 0, tone.getNumSamples(), sr, 4.0f, false);
+        bool identical = a1->getNumSamples() == a2->getNumSamples();
+        for (int i = 0; identical && i < a1->getNumSamples(); ++i)
+            identical = juce::exactlyEqual (a1->getSample (0, i), a2->getSample (0, i));
+        CHECK (identical);
+    }
+
     // Transient position scales with the ratio: hits at 0.25/0.5/0.75 s should land at ratio * that time.
     juce::AudioBuffer<float> hits (1, (int) sr);
     hits.clear();
@@ -690,6 +700,63 @@ int main()
         CHECK (p0.lanes[1].steps[4].on && std::abs (p0.lanes[1].steps[4].micro - 0.5f) < 1e-6f && p0.lanes[2].steps[12].ratchet == 2);
         CHECK (restored.getSeqPattern (3).name == "Fill" && restored.getSeqPattern (3).lanes[5].length == 12 && restored.getSeqPattern (3).lanes[5].steps[11].on);
         CHECK (restored.getSeqPattern (1).isEmpty());
+    }
+
+    // ---- Phase 13: conditions, weaving and undo through the processor ----
+    {
+        writeTestWav (wavFile);
+        NeuroMPCProcessor w;
+        w.prepareToPlay (rate, block);
+        CHECK (w.loadSample (wavFile, error));
+        w.editSlices ([] (auto& s) { s.grid (4); });
+        setParam (w, ParamIDs::attack, 0.0f);
+        setParam (w, ParamIDs::release, 1.0f);
+        setParam (w, ParamIDs::playMode, 1.0f);
+        // Pattern 1: pad 1 on step 1 of every bar; a 1:2 pad-3 hit on step 9. Pattern 2 (fill): pad 2 on step 1.
+        w.editSeqPattern (0, [] (auto& pat)
+        {
+            pat.lanes[0].steps[0] = { true, 1.0f };
+            pat.lanes[2].steps[8] = { true, 1.0f };
+            pat.lanes[2].steps[8].condition = neuro::SeqCondition::ratio;
+            pat.lanes[2].steps[8].condA = 1;
+            pat.lanes[2].steps[8].condB = 2;
+        });
+        w.editSeqPattern (1, [] (auto& pat) { pat.lanes[1].steps[0] = { true, 1.0f }; });
+        setParam (w, ParamIDs::weaveFill, 2.0f);       // fills from pattern 2...
+        setParam (w, ParamIDs::weaveFillEvery, 2.0f);  // ...on every 2nd bar
+        setParam (w, ParamIDs::seqMode, 2.0f);
+        auto x = capture (w, 4 * 96000 / block + 1, {});
+        const auto at = [&] (int bar, int step) { return std::abs (x[(size_t) (bar * 96000 + step * 6000 + 1000)]); };
+        std::printf ("  weave bars: %.2f %.2f %.2f %.2f\n", at (0, 0), at (1, 0), at (2, 0), at (3, 0));
+        CHECK (std::abs (at (0, 0) - 0.1f) < 0.005f && std::abs (at (1, 0) - 0.2f) < 0.005f);  // bar 2 is the woven fill
+        CHECK (std::abs (at (2, 0) - 0.1f) < 0.005f && std::abs (at (3, 0) - 0.2f) < 0.005f);
+
+        // Without weaving, the 1:2 step plays on lane cycles 1 and 3 only (bars 1, 3; not 2, 4).
+        setParam (w, ParamIDs::weaveFill, 0.0f);
+        setParam (w, ParamIDs::seqMode, 0.0f);
+        render (w, 1);
+        setParam (w, ParamIDs::seqMode, 2.0f);
+        x = capture (w, 4 * 96000 / block + 1, {});
+        std::printf ("  1:2 step 9 per bar: %.2f %.2f %.2f %.2f\n", at (0, 8), at (1, 8), at (2, 8), at (3, 8));
+        CHECK (std::abs (at (0, 8) - 0.3f) < 0.005f && at (1, 8) == 0.0f && std::abs (at (2, 8) - 0.3f) < 0.005f && at (3, 8) == 0.0f);
+        setParam (w, ParamIDs::weaveFill, 2.0f);
+
+        // Undo / redo per pattern; transformations are separate undo steps.
+        CHECK (w.canUndoSeqPattern (0) && ! w.canRedoSeqPattern (0));
+        w.editSeqPattern (0, [] (auto& pat) { neuro::pattern::reverse (pat.lanes[0]); }, NeuroMPCProcessor::Undo::always);
+        CHECK (w.getSeqPattern (0).lanes[0].steps[15].on && ! w.getSeqPattern (0).lanes[0].steps[0].on);
+        CHECK (w.undoSeqPattern (0) && w.getSeqPattern (0).lanes[0].steps[0].on && w.canRedoSeqPattern (0));
+        CHECK (w.redoSeqPattern (0) && w.getSeqPattern (0).lanes[0].steps[15].on);
+        CHECK (w.undoSeqPattern (0));
+
+        // Conditions and weave settings persist.
+        juce::MemoryBlock st;
+        w.getStateInformation (st);
+        NeuroMPCProcessor restored;
+        restored.setStateInformation (st.getData(), (int) st.getSize());
+        const auto& cond = restored.getSeqPattern (0).lanes[2].steps[8];
+        CHECK (cond.condition == neuro::SeqCondition::ratio && cond.condA == 1 && cond.condB == 2);
+        CHECK ((int) restored.apvts.getRawParameterValue (ParamIDs::weaveFill)->load() == 2);
     }
 
     // Missing file on restore is reported, not substituted.

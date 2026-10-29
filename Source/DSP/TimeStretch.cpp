@@ -33,7 +33,9 @@ namespace
             std::copy (src, src + length, in + margin);
         }
 
-        signalsmith::stretch::SignalsmithStretch<float> stretch;
+        // Seeded from the region (not std::random_device): above x2 the algorithm randomises phases, and identical
+        // settings must always render identical audio.
+        signalsmith::stretch::SignalsmithStretch<float> stretch (0x4E4D5043L + start * 31L + length);
         stretch.presetDefault (channels, (float) sampleRate);
         stretch.setTransposeSemitones (pitch);
 
