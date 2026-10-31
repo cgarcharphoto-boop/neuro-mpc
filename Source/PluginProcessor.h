@@ -5,6 +5,7 @@
 #include "Audio/VoiceEngine.h"
 #include "AI/DrumExtractor.h"
 #include "Core/DrumNMF.h"
+#include "Core/MidiClock.h"
 #include "Core/Arpeggiator.h"
 #include "Core/MidiMap.h"
 #include "Core/RtShared.h"
@@ -67,6 +68,8 @@ namespace ParamIDs
     inline constexpr auto chordLock    = "chordLock";
     inline constexpr auto chordInput   = "chordInput";
     inline constexpr auto chordSplit   = "chordSplit";
+    inline constexpr auto clockIn      = "midiClockIn";
+    inline constexpr auto clockOut     = "midiClockOut";
     // Per drum-class level, in DrumClass order.
     inline constexpr const char* classLevel[] { "levelKick", "levelSnare", "levelClosedHat", "levelOpenHat", "levelTom1", "levelTom2",
                                                 "levelFloorTom", "levelCrash", "levelRide", "levelPerc", "levelTonal" };
@@ -317,6 +320,11 @@ private:
     int chordKeysDown = 0;
     std::vector<neuro::StretchKey> chordRequested;
     std::atomic<float> *chordLockParam = nullptr, *chordInputParam = nullptr, *chordSplitParam = nullptr;
+    std::atomic<float> *clockInParam = nullptr, *clockOutParam = nullptr;
+    neuro::MidiClockFollower clockFollower;
+    neuro::MidiClockLeader clockLeader;
+    int64_t blockStartTime = 0;            // absolute sample time (audio thread)
+    double lastClockBeatEnd = -1.0e9;      // follower position at the end of the last block: never moves backwards
     std::atomic<float> *seqModeParam = nullptr, *seqPatternParam = nullptr, *seqRateParam = nullptr, *seqSwingParam = nullptr,
                        *seqFillParam = nullptr, *weaveAccentParam = nullptr, *weaveAccentAmountParam = nullptr,
                        *weaveFillParam = nullptr, *weaveFillEveryParam = nullptr, *weavePitchParam = nullptr;

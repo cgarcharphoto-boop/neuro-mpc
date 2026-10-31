@@ -1,5 +1,6 @@
 #include "Core/Arpeggiator.h"
 #include "Core/DrumNMF.h"
+#include "Core/MidiClock.h"
 #include "Core/KeyDetector.h"
 #include "Core/MidiMap.h"
 #include "Core/PadBank.h"
@@ -1203,6 +1204,51 @@ static void teachKitTests()
     CHECK (t[0] > g[0] && t[1] >= 0.9 && t[2] >= 0.85); // the misread drum improves, the others stay right
 }
 
+// MIDI clock: a leader's output followed by a follower reproduces tempo and beat position (unison), incl. SPP/Continue.
+static void midiClockTests()
+{
+    constexpr double rate = 48000.0, bpm = 93.0;
+    const auto beatsPerSample = bpm / 60.0 / rate;
+    MidiClockLeader leader;
+    MidiClockFollower follower;
+    follower.prepare (rate);
+    int64_t now = 0;
+    double maxError = 0.0, beat = 0.0;
+    int ticks = 0, starts = 0;
+
+    for (int block = 0; block < 400; ++block, now += 256, beat += 256 * beatsPerSample) // ~2.1 s, 256-sample blocks
+    {
+        leader.process (true, beat, beatsPerSample, 256, [&] (int offset, uint8_t status)
+        {
+            ticks += status == 0xf8;
+            starts += status == 0xfa;
+            follower.handle (now + offset, status);
+        });
+
+        if (block > 30 && follower.isRunning (now))
+            maxError = std::max (maxError, std::abs (follower.ppqAt (now) - beat));
+    }
+
+    std::printf ("  MIDI clock: %d ticks, follower %.2f BPM (true %.0f), max position error %.4f beats (%.2f ms)\n", ticks,
+                 follower.getBpm(), bpm, maxError, maxError / beatsPerSample / rate * 1000.0);
+    CHECK (starts == 1 && std::abs (ticks - (int) std::ceil (beat * 24.0)) <= 1);
+    CHECK (std::abs (follower.getBpm() - bpm) < 0.5 && maxError < 0.002); // < 0.002 beats = ~1.3 ms at 93 BPM
+
+    // Stop, Song Position Pointer to bar 3 (32 sixteenths = beat 8), Continue: the next tick is beat 8.
+    follower.handle (now, 0xfc);
+    CHECK (! follower.isRunning (now));
+    follower.handle (now + 10, 0xf2, 32);
+    follower.handle (now + 20, 0xfb);
+    follower.handle (now + 30, 0xf8);
+    CHECK (follower.isRunning (now + 30) && std::abs (follower.ppqAt (now + 30) - 8.0) < 1.0e-9);
+    CHECK (! follower.isRunning (now + 30 + (int64_t) rate)); // master gone: stopped
+
+    // Leader Stop.
+    int stops = 0;
+    leader.process (false, 0.0, beatsPerSample, 256, [&] (int, uint8_t status) { stops += status == 0xfc; });
+    CHECK (stops == 1);
+}
+
 static void keyTests()
 {
     auto print = [] (const char* name, const KeyEstimate& k)
@@ -1257,6 +1303,7 @@ int main()
     timbreTests();
     drumNmfTests();
     teachKitTests();
+    midiClockTests();
     keyTests();
     std::printf (failures == 0 ? "All core tests passed\n" : "%d failure(s)\n", failures);
     return failures == 0 ? EXIT_SUCCESS : EXIT_FAILURE;

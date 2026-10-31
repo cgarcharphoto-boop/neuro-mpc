@@ -77,6 +77,8 @@ NeuroMPCProcessor::NeuroMPCProcessor()
     chordLockParam  = apvts.getRawParameterValue (ParamIDs::chordLock);
     chordInputParam = apvts.getRawParameterValue (ParamIDs::chordInput);
     chordSplitParam = apvts.getRawParameterValue (ParamIDs::chordSplit);
+    clockInParam    = apvts.getRawParameterValue (ParamIDs::clockIn);
+    clockOutParam   = apvts.getRawParameterValue (ParamIDs::clockOut);
     padNoteHeld.fill (-1);
 
     for (int i = 0; i < neuro::padsPerBank; ++i)
@@ -228,7 +230,11 @@ juce::AudioProcessorValueTreeState::ParameterLayout NeuroMPCProcessor::createLay
                                                         StringArray { "Non-pad notes", "Below split" }, 0),
                 std::make_unique<AudioParameterInt> (ParameterID { ParamIDs::chordSplit, 1 }, "Chord-Lock Split", 0, 127, 60,
                                                      AudioParameterIntAttributes().withStringFromValueFunction (
-                                                         [] (int v, int) { return MidiMessage::getMidiNoteName (v, true, true, 3); })));
+                                                         [] (int v, int) { return MidiMessage::getMidiNoteName (v, true, true, 3); })),
+                // Run in unison with an MPC: follow its MIDI clock when the host transport is not playing (e.g.
+                // standalone), and/or send clock (24 PPQN + Start/Stop) from NEURO's transport.
+                std::make_unique<AudioParameterBool> (ParameterID { ParamIDs::clockIn, 1 }, "Follow MIDI Clock", true),
+                std::make_unique<AudioParameterBool> (ParameterID { ParamIDs::clockOut, 1 }, "Send MIDI Clock", false));
     return layout;
 }
 
@@ -250,6 +256,10 @@ void NeuroMPCProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
     engine.prepare (sampleRate);
     hostSampleRate = sampleRate;
+    clockFollower.prepare (sampleRate);
+    clockLeader = {};
+    blockStartTime = 0;
+    lastClockBeatEnd = -1.0e9;
     modBuffer.assign ((size_t) juce::jmax (1024, samplesPerBlock), 0.0f);
     bendSemitones = 0.0f;
     arp = {};
@@ -310,6 +320,26 @@ void NeuroMPCProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
                 if (const auto ppq = position->getPpqPosition())
                     hostPpq = *ppq;
         }
+    }
+
+    // MIDI clock in (MPC as master): all clock messages of this block first, then the position at the block start is
+    // extrapolated from the latest tick, so a Start in the middle of the block lands on its exact sample.
+    for (const auto meta : midi)
+        if (const auto* raw = meta.data; meta.numBytes >= 1 && (raw[0] == 0xf8 || raw[0] == 0xfa || raw[0] == 0xfb || raw[0] == 0xfc || raw[0] == 0xf2))
+            clockFollower.handle (blockStartTime + meta.samplePosition, raw[0], raw[0] == 0xf2 && meta.numBytes >= 3 ? raw[1] | (raw[2] << 7) : 0);
+
+    if (! hostPpq && clockInParam->load() > 0.5f && clockFollower.isRunning (blockStartTime + numSamples))
+    {
+        // Each block covers [start, end) of the clock's timeline. A block that ran ahead (tempo still being measured,
+        // jitter) is followed by a slightly slower one: the position slews back onto the clock, never backwards (no
+        // repeated steps). A big difference is a relocation (Start, Song Position): jump.
+        const auto trueStart = clockFollower.ppqAt (blockStartTime);
+        const auto trueEnd = clockFollower.ppqAt (blockStartTime + numSamples);
+        const auto start = std::abs (trueStart - lastClockBeatEnd) < 0.25 ? lastClockBeatEnd : trueStart;
+        const auto end = juce::jmax (start, trueEnd);
+        hostPpq = start;
+        bpm = juce::jmax (1.0, (end - start) / numSamples * 60.0 * hostSampleRate); // effective tempo of this block
+        lastClockBeatEnd = end;
     }
 
     const auto beatsPerSample = bpm / 60.0 / hostSampleRate;
@@ -423,6 +453,9 @@ void NeuroMPCProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     {
         const auto t = juce::jlimit (0, juce::jmax (0, numSamples - 1), meta.samplePosition);
         const auto msg = meta.getMessage();
+
+        if (msg.isMidiClock() || msg.isMidiStart() || msg.isMidiContinue() || msg.isMidiStop() || msg.isSongPositionPointer())
+            continue; // transport, handled above
 
         if (handleMappedMidi (msg))
             continue; // MIDI Learn: learned or mapped messages do not play
@@ -612,6 +645,19 @@ void NeuroMPCProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     }
 
     renderWithModulation (outs, pos, numSamples);
+
+    // MIDI out: only NEURO's clock (incoming MIDI is not echoed). Follows whichever transport drives NEURO: host,
+    // MIDI clock in (then it is a thru), or the sequencer's free-running clock.
+    midi.clear();
+    {
+        const auto freeRunning = (int) seqModeParam->load() == 2;
+        const auto running = clockOutParam->load() > 0.5f && (hostPpq.has_value() || freeRunning);
+        const auto beat = hostPpq ? *hostPpq : seqFreeOrigin - numSamples * beatsPerSample; // free origin already advanced
+        clockLeader.process (running, beat, beatsPerSample, numSamples, [&] (int offset, uint8_t status)
+                             { midi.addEvent (juce::MidiMessage (status), offset); });
+    }
+
+    blockStartTime += numSamples;
 
     gainSmoothed.setTargetValue (juce::Decibels::decibelsToGain (gainParam->load()));
     gainSmoothed.applyGain (buffer, buffer.getNumSamples());

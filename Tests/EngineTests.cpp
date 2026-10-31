@@ -824,7 +824,7 @@ int main()
             "arpPhrase", "arpVariation", "arpVaryPitch", "arpVaryVelocity", "arpVaryRhythm", "arpReturn", "arpHumanTime",
             "arpHumanVelocity", "seqMode", "seqPattern", "seqRate", "seqSwing", "seqFill", "weaveAccent", "weaveAccentAmount",
             "weaveFill", "weaveFillEvery", "weavePitch", "padBank", "padBankFollow", "padChannel", "levelKick", "levelSnare",
-            "levelClosedHat", "levelOpenHat", "levelTom1", "levelTom2", "levelFloorTom", "levelCrash", "levelRide", "levelPerc", "levelTonal", "chordLock", "chordInput", "chordSplit" };
+            "levelClosedHat", "levelOpenHat", "levelTom1", "levelTom2", "levelFloorTom", "levelCrash", "levelRide", "levelPerc", "levelTonal", "chordLock", "chordInput", "chordSplit", "midiClockIn", "midiClockOut" };
         NeuroMPCProcessor a;
         juce::StringArray ids;
         for (auto* param : a.getParameters())
@@ -975,6 +975,96 @@ int main()
         auto tail = hostRun (20);
         CHECK (std::all_of (tail.begin() + block * 2, tail.end(), [] (float v) { return v == 0.0f; })); // stop: no stuck notes
         hs.setPlayHead (nullptr);
+
+        // In unison with an MPC (MIDI clock master), no host transport: Start lands mid-block on its exact sample, the
+        // steps follow the clock's tempo (100 BPM), Stop ends cleanly. The clock is not echoed to MIDI out.
+        {
+            neuro::MidiClockLeader mpc;
+            const auto bps = 100.0 / 60.0 / rate;
+            const int startBlock = 3, startOffset = 300; // inside the block
+            double mpcBeat = -(startOffset * bps);
+            std::vector<float> out;
+            juce::AudioBuffer<float> buf (2, block);
+            int echoed = 0;
+
+            for (int blk = 0; blk < 240; ++blk)
+            {
+                juce::MidiBuffer midi;
+                const auto playing = blk >= startBlock && blk < 200;
+                // The MPC's transport starts mid-block: emit from the start sample, beats relative to the block.
+                mpc.process (playing, mpcBeat, bps, block, [&] (int offset, uint8_t status)
+                             { midi.addEvent (juce::MidiMessage (status), blk == startBlock && status == 0xfa ? startOffset : offset); });
+                if (playing) mpcBeat += block * bps;
+                hs.processBlock (buf, midi);
+                echoed += midi.getNumEvents();
+                out.insert (out.end(), buf.getReadPointer (0), buf.getReadPointer (0) + block);
+            }
+
+            on = onsets (out);
+            const auto start = startBlock * block + startOffset;
+            std::printf ("  MIDI clock follow: onsets %d %d %d (expected %d %d %d), echoed %d\n", on.size() > 0 ? on[0] : -1,
+                         on.size() > 1 ? on[1] : -1, on.size() > 2 ? on[2] : -1, start, start + 28800, start + 57600, echoed);
+            CHECK (on.size() >= 4 && std::abs (on[0] - start) <= 2 && std::abs (on[1] - (start + 28800)) <= 2 && std::abs (on[2] - (start + 57600)) <= 2);
+            CHECK (std::all_of (out.begin() + 202 * block, out.end(), [] (float v) { return v == 0.0f; })); // MPC stopped
+            CHECK (echoed == 0);
+
+            // Real USB MIDI: +-1 ms jitter on every tick. Steps stay within ~1 ms of the MPC's beat, still never doubled.
+            juce::Random jitter (3);
+            mpc = {};
+            mpcBeat = -(startOffset * bps);
+            out.clear();
+            for (int blk = 0; blk < 240; ++blk)
+            {
+                juce::MidiBuffer midi;
+                const auto playing = blk >= startBlock && blk < 200;
+                mpc.process (playing, mpcBeat, bps, block, [&] (int offset, uint8_t status)
+                {
+                    const auto shifted = status == 0xf8 && blk > startBlock ? juce::jlimit (0, block - 1, offset + jitter.nextInt ({ -48, 49 })) : offset;
+                    midi.addEvent (juce::MidiMessage (status), blk == startBlock && status == 0xfa ? startOffset : shifted);
+                });
+                if (playing) mpcBeat += block * bps;
+                hs.processBlock (buf, midi);
+                out.insert (out.end(), buf.getReadPointer (0), buf.getReadPointer (0) + block);
+            }
+            on = onsets (out);
+            auto worstMs = 0.0;
+            for (size_t i = 0; i < on.size(); ++i) worstMs = std::max (worstMs, std::abs (on[i] - (start + (double) i * 28800)) / rate * 1000.0);
+            std::printf ("  MIDI clock follow, +-1 ms jitter: %zu onsets, worst %.2f ms\n", on.size(), worstMs);
+            CHECK (on.size() == 4 && worstMs < 1.5); // 3.5 beats played: quarter notes on beats 0-3
+        }
+
+        // NEURO as master: free-running sequencer + Send MIDI Clock -> Start, then 24 ticks per beat on the right samples.
+        {
+            setParam (hs, ParamIDs::seqMode, 0.0f);
+            render (hs, 1);
+            setParam (hs, ParamIDs::clockOut, 1.0f);
+            setParam (hs, ParamIDs::seqMode, 2.0f);
+            juce::AudioBuffer<float> buf (2, block);
+            std::vector<int64_t> ticks;
+            int starts = 0;
+
+            for (int blk = 0; blk < 100; ++blk)
+            {
+                juce::MidiBuffer midi;
+                hs.processBlock (buf, midi);
+                for (const auto meta : midi)
+                {
+                    starts += meta.data[0] == 0xfa;
+                    if (meta.data[0] == 0xf8) ticks.push_back ((int64_t) blk * block + meta.samplePosition);
+                }
+            }
+
+            const auto samplesPerTick = rate * 60.0 / 120.0 / 24.0; // 1000
+            auto worst = 0.0;
+            for (size_t i = 0; i < ticks.size(); ++i) worst = std::max (worst, std::abs ((double) ticks[i] - (double) i * samplesPerTick));
+            std::printf ("  MIDI clock send: %d start, %zu ticks, worst tick error %.1f samples\n", starts, ticks.size(), worst);
+            CHECK (starts == 1 && ticks.size() == (size_t) std::ceil (100.0 * block / samplesPerTick) && worst <= 1.0);
+            setParam (hs, ParamIDs::seqMode, 0.0f);
+            juce::MidiBuffer midi;
+            hs.processBlock (buf, midi);
+            CHECK (midi.getNumEvents() == 1 && midi.begin().operator*().data[0] == 0xfc); // Stop
+            setParam (hs, ParamIDs::clockOut, 0.0f);
+        }
     }
 
     // ---- Performance (spec 28.3): worst-case load vs real time ----

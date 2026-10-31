@@ -354,6 +354,12 @@ NeuroMPCEditor::NeuroMPCEditor (NeuroMPCProcessor& p) : AudioProcessorEditor (p)
         });
     };
     attachButton (seqFill, ParamIDs::seqFill);
+    attachButton (clockIn, ParamIDs::clockIn);
+    attachButton (clockOut, ParamIDs::clockOut);
+    clockIn.setTooltip ("Follow MIDI clock (e.g. an MPC as master) when the host transport is not playing: Seq 'host transport', "
+                        "arp and LFO sync then run in unison with it, Start / Stop / Song Position included");
+    clockOut.setTooltip ("Send MIDI clock (24 PPQN + Start / Stop) from NEURO's transport, so an MPC set to sync to MIDI clock follows "
+                         "(standalone: pick the MIDI output in Options > Audio/MIDI Settings)");
     seqFill.setTooltip ("Fill: steps with fill / not-fill conditions follow this switch");
     seqUndo.onClick = [this] { proc.undoSeqPattern (proc.getSelectedSeqPattern()); updateSeqPanel(); };
     seqRedo.onClick = [this] { proc.redoSeqPattern (proc.getSelectedSeqPattern()); updateSeqPanel(); };
@@ -1498,7 +1504,7 @@ std::vector<juce::Component*> NeuroMPCEditor::seqPanelComponents()
     std::vector<juce::Component*> list { &seqGrid, &seqTitle, &seqName, &seqInfo, &seqPatternBox, &seqModeBox, &seqRateBox,
                                          &laneNote, &seqSwing, &stepVelocity, &stepGate, &stepChance, &stepRatchet, &stepMicro,
                                          &stepPitch, &laneLength, &seqDuplicate, &seqClear, &lanePageButton, &seqUndo, &seqRedo,
-                                         &seqFill, &stepCondition };
+                                         &seqFill, &stepCondition, &clockIn, &clockOut };
 
     for (auto& b : stepPageButtons)
         list.push_back (&b);
@@ -2155,7 +2161,10 @@ void NeuroMPCEditor::resized()
         seqUndo.setBounds (r1.removeFromLeft (52));
         r1.removeFromLeft (4);
         seqRedo.setBounds (r1.removeFromLeft (52));
-        r1.removeFromLeft (12);
+        r1.removeFromLeft (8);
+        clockIn.setBounds (r1.removeFromLeft (76));
+        clockOut.setBounds (r1.removeFromLeft (84));
+        r1.removeFromLeft (8);
         seqInfo.setBounds (r1);
 
         auto editorRow = qp.removeFromBottom (24);

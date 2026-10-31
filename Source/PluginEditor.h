@@ -177,7 +177,7 @@ private:
                  stepPitch { juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight },
                  laneLength { juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight };
     juce::TextButton seqDuplicate { "Duplicate" }, seqClear { "Clear" }, lanePageButton { "Lanes 1-8" }, seqUndo { "Undo" }, seqRedo { "Redo" };
-    juce::ToggleButton seqFill { "Fill" };
+    juce::ToggleButton seqFill { "Fill" }, clockIn { "Clock in" }, clockOut { "Clock out" };
     juce::ComboBox stepCondition;
 
     // Evolve panel: transformations, mutation (genome), recombination, phrase weaving
