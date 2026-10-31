@@ -23,6 +23,13 @@ struct SliceDefinition
     float timeStretchRatio = 1.0f; // 1.0 = original duration, 2.0 = twice as long
     bool preserveTransients = true; // stretch each transient-delimited segment separately (no pre-echo)
     float rootNote = -1.0f;         // manual pitch correction (fractional MIDI note); < 0 means use the detected pitch
+    int drumClass = -1;             // manual class override (DrumClass index); -1 = detected
+    // Derived from background analysis (not persisted): class, timbre-map position, detected pitch (-1 = unpitched).
+    int detectedClass = -1;
+    float timbreX = -1.0f, timbreY = -1.0f;
+    float detectedRoot = -1.0f;
+
+    int effectiveClass() const noexcept { return drumClass >= 0 ? drumClass : detectedClass; }
     bool reverse = false;
     bool enabled = true;
 
@@ -125,6 +132,58 @@ public:
 
         slices[(size_t) i].timeStretchRatio = std::clamp (ratio, minStretch, maxStretch);
         return true;
+    }
+
+    bool setDrumClass (int i, int cls)
+    {
+        if (i < 0 || i >= size())
+            return false;
+
+        slices[(size_t) i].drumClass = cls;
+        return true;
+    }
+
+    // Stores analysis results on the slice with this id (if it still covers the analysed region).
+    bool setAnalysis (int id, int64_t start, int64_t end, int cls, float x, float y, float root)
+    {
+        const auto i = indexOfId (id);
+
+        if (i < 0 || slices[(size_t) i].startSample != start || slices[(size_t) i].endSample != end)
+            return false;
+
+        auto& s = slices[(size_t) i];
+        auto differs = [] (float a, float b) { return std::abs (a - b) > 1.0e-6f; };
+        const auto changed = s.detectedClass != cls || differs (s.timbreX, x) || differs (s.timbreY, y) || differs (s.detectedRoot, root);
+        s.detectedClass = cls;
+        s.timbreX = x;
+        s.timbreY = y;
+        s.detectedRoot = root;
+        return changed;
+    }
+
+    // Nearest slice on the timbre map (optionally only of one class); -1 if none is analysed.
+    int nearestTimbre (float x, float y, int cls = -1) const noexcept
+    {
+        int best = -1;
+        float bestDistance = 1.0e9f;
+
+        for (int i = 0; i < size(); ++i)
+        {
+            const auto& s = slices[(size_t) i];
+
+            if (s.timbreX < 0.0f || ! s.enabled || (cls >= 0 && s.effectiveClass() != cls))
+                continue;
+
+            const auto d = (s.timbreX - x) * (s.timbreX - x) + (s.timbreY - y) * (s.timbreY - y);
+
+            if (d < bestDistance)
+            {
+                bestDistance = d;
+                best = i;
+            }
+        }
+
+        return best;
     }
 
     bool setPitch (int i, float semitones)

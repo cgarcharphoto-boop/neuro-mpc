@@ -50,18 +50,29 @@ void VoiceEngine::playSlice (int index, int noteTag, float level, float pitchOff
     const auto displayOffset = start;
     auto displayScale = 1.0;
     auto pitch = (double) slice.pitchSemitones + pitchOffset; // slice pitch is resampled unless a keep-length render is used
+    auto chordShift = 0.0f;
 
-    if (bank != nullptr && slice.needsRender())
+    if (params.chordMode != 0 && params.chordMask != 0 && chordLockEligible (slice))
+        chordShift = chordLockOffset ((slice.rootNote >= 0.0f ? slice.rootNote : slice.detectedRoot) + (float) pitch, params.chordMask);
+
+    // Keep-length Chord-Lock uses a variant rendered with the whole-semitone part of the shift.
+    const auto chordRendered = params.chordMode == 2 ? (int) std::lround (chordShift) : 0;
+    const auto useRender = slice.needsRender() || chordRendered != 0;
+
+    if (bank != nullptr && useRender)
     {
-        if (const auto* entry = bank->find (slice); entry != nullptr && entry->audio->getNumSamples() >= 2)
+        if (const auto* entry = bank->find (slice, chordRendered); entry != nullptr && entry->audio->getNumSamples() >= 2)
         {
             src = entry->audio.get();
             start = 0;
             end = src->getNumSamples();
             displayScale = 1.0 / slice.timeStretchRatio;
             pitch -= slice.renderedPitch(); // already in the render
+            chordShift -= (float) chordRendered;
         }
     }
+
+    pitch += chordShift; // the remainder (or all of it, while a render is pending) by resampling
 
     if (chokeGroup > 0)
         for (auto& other : voices)
@@ -85,6 +96,7 @@ void VoiceEngine::playSlice (int index, int noteTag, float level, float pitchOff
     v->releasing = false;
     v->note = params.oneShot ? -1 : noteTag; // one-shot voices ignore note-off
     v->chokeGroup = chokeGroup;
+    v->drumClass = slice.effectiveClass();
     v->src = src;
     v->displayOffset = displayOffset;
     v->displayScale = displayScale;
@@ -121,16 +133,19 @@ void VoiceEngine::dropVoicesNotIn (const StretchBank* bank, const juce::AudioBuf
             v.active = false;
 }
 
-void VoiceEngine::render (juce::AudioBuffer<float>& out, int startSample, int numSamples, const float* modSemitones) noexcept
+void VoiceEngine::render (const OutputBuses& buses, int startSample, int numSamples, const float* modSemitones) noexcept
 {
     constexpr double declick = 64.0; // samples of fade before a slice's end
     constexpr int modInterval = 16;  // pitch modulation update rate (samples)
-    const auto outChannels = out.getNumChannels();
     const Voice* newest = nullptr;
 
     for (auto& v : voices)
     {
         const auto srcChannels = v.active ? v.src->getNumChannels() : 0;
+        const auto hasClass = v.drumClass >= 0 && v.drumClass < numDrumClasses;
+        auto& out = *(hasClass && buses.classes[(size_t) v.drumClass] != nullptr ? buses.classes[(size_t) v.drumClass] : buses.main);
+        const auto outChannels = out.getNumChannels();
+        const auto classLevel = hasClass ? buses.levels[(size_t) v.drumClass] : 1.0f;
         double rate = v.baseRate;
 
         for (int i = 0; i < numSamples && v.active; ++i)
@@ -162,7 +177,7 @@ void VoiceEngine::render (juce::AudioBuffer<float>& out, int startSample, int nu
             }
 
             auto remaining = rate > 0.0 ? ((double) v.end - v.pos) / rate : (v.pos - (double) v.start) / -rate;
-            auto g = v.gain * v.env * (float) std::min (1.0, remaining / declick);
+            auto g = v.gain * classLevel * v.env * (float) std::min (1.0, remaining / declick);
             auto frac = (float) (v.pos - (double) idx);
             auto next = idx + 1 < v.end ? idx + 1 : idx;
 

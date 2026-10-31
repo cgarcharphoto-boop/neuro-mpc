@@ -1,6 +1,7 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
 #include "Core/Scales.h"
+#include "Core/TransientDetector.h"
 
 namespace
 {
@@ -8,7 +9,12 @@ namespace
 }
 
 NeuroMPCProcessor::NeuroMPCProcessor()
-    : AudioProcessor (BusesProperties().withOutput ("Output", juce::AudioChannelSet::stereo(), true)),
+    : AudioProcessor ([] {
+          // Main output + one optional stereo output per drum class, for mixing each kit piece on its own DAW track.
+          auto buses = BusesProperties().withOutput ("Output", juce::AudioChannelSet::stereo(), true);
+          for (int c = 0; c < neuro::numDrumClasses; ++c)
+              buses = buses.withOutput (neuro::drumClassName ((neuro::DrumClass) c), juce::AudioChannelSet::stereo(), false);
+          return buses; }()),
       apvts (*this, nullptr, "PARAMS", createLayout())
 {
     formats.registerBasicFormats();
@@ -62,6 +68,13 @@ NeuroMPCProcessor::NeuroMPCProcessor()
     padBankParam       = apvts.getRawParameterValue (ParamIDs::padBank);
     padBankFollowParam = apvts.getRawParameterValue (ParamIDs::padBankFollow);
     padChannelParam    = apvts.getRawParameterValue (ParamIDs::padChannel);
+
+    for (int c = 0; c < neuro::numDrumClasses; ++c)
+        classLevelParams[(size_t) c] = apvts.getRawParameterValue (ParamIDs::classLevel[c]);
+
+    chordLockParam  = apvts.getRawParameterValue (ParamIDs::chordLock);
+    chordInputParam = apvts.getRawParameterValue (ParamIDs::chordInput);
+    chordSplitParam = apvts.getRawParameterValue (ParamIDs::chordSplit);
     padNoteHeld.fill (-1);
 
     for (int i = 0; i < neuro::padsPerBank; ++i)
@@ -82,7 +95,7 @@ NeuroMPCProcessor::~NeuroMPCProcessor()
 juce::AudioProcessorValueTreeState::ParameterLayout NeuroMPCProcessor::createLayout()
 {
     using namespace juce;
-    return {
+    AudioProcessorValueTreeState::ParameterLayout layout {
         std::make_unique<AudioParameterFloat> (ParameterID { ParamIDs::gain, 1 }, "Gain",
                                                NormalisableRange<float> (-48.0f, 6.0f, 0.1f), 0.0f,
                                                AudioParameterFloatAttributes().withLabel ("dB")),
@@ -198,12 +211,35 @@ juce::AudioProcessorValueTreeState::ParameterLayout NeuroMPCProcessor::createLay
                                                     for (int c = 1; c <= 16; ++c) names.add (String (c));
                                                     return names; }(), 0)
     };
+
+    for (int c = 0; c < neuro::numDrumClasses; ++c)
+        layout.add (std::make_unique<AudioParameterFloat> (ParameterID { ParamIDs::classLevel[c], 1 },
+                                                           String (neuro::drumClassName ((neuro::DrumClass) c)) + " Level",
+                                                           NormalisableRange<float> (-60.0f, 6.0f, 0.1f, 2.0f), 0.0f,
+                                                           AudioParameterFloatAttributes().withLabel ("dB")));
+
+    layout.add (std::make_unique<AudioParameterChoice> (ParameterID { ParamIDs::chordLock, 1 }, "Chord-Lock",
+                                                        StringArray { "Off", "Resample", "Keep length" }, 0),
+                std::make_unique<AudioParameterChoice> (ParameterID { ParamIDs::chordInput, 1 }, "Chord-Lock Input",
+                                                        StringArray { "Non-pad notes", "Below split" }, 0),
+                std::make_unique<AudioParameterInt> (ParameterID { ParamIDs::chordSplit, 1 }, "Chord-Lock Split", 0, 127, 60,
+                                                     AudioParameterIntAttributes().withStringFromValueFunction (
+                                                         [] (int v, int) { return MidiMessage::getMidiNoteName (v, true, true, 3); })));
+    return layout;
 }
 
 bool NeuroMPCProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
 {
-    auto out = layouts.getMainOutputChannelSet();
-    return out == juce::AudioChannelSet::mono() || out == juce::AudioChannelSet::stereo();
+    const auto out = layouts.getMainOutputChannelSet();
+
+    if (out != juce::AudioChannelSet::mono() && out != juce::AudioChannelSet::stereo())
+        return false;
+
+    for (int i = 1; i < layouts.outputBuses.size(); ++i) // class outputs: off or stereo
+        if (! layouts.outputBuses[i].isDisabled() && layouts.outputBuses[i] != juce::AudioChannelSet::stereo())
+            return false;
+
+    return true;
 }
 
 void NeuroMPCProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
@@ -253,6 +289,7 @@ void NeuroMPCProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     vp.keyboardRoot = keyboardRootNote.load();
     vp.scaleMask = neuro::scales[(size_t) juce::jlimit (0, (int) neuro::scales.size() - 1, (int) scaleParam->load())].mask;
     vp.scaleRoot = (int) scaleRootParam->load();
+    vp.chordMode = (int) chordLockParam->load();
 
     // Host timing, shared by the pitch LFO and the arpeggiator. Never derived from the GUI.
     const auto numSamples = buffer.getNumSamples();
@@ -272,6 +309,7 @@ void NeuroMPCProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     }
 
     const auto beatsPerSample = bpm / 60.0 / hostSampleRate;
+    lastHostBpm.store (bpm);
 
     // Pitch LFO rate: free-running, or locked to the host tempo and beat position.
     lfoIncrement = lfoRateParam->load() / hostSampleRate;
@@ -385,6 +423,34 @@ void NeuroMPCProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
         if (handleMappedMidi (msg))
             continue; // MIDI Learn: learned or mapped messages do not play
 
+        // Chord-Lock input: chord notes are consumed and latched (a new chord replaces the last one).
+        if (vp.chordMode != 0 && msg.isNoteOnOrOff())
+        {
+            const auto note = msg.getNoteNumber();
+            const auto isChordNote = (int) chordInputParam->load() == 1
+                                         ? note < (int) chordSplitParam->load()
+                                         : (hardwarePads == nullptr || hardwarePads->indexOfNote[(size_t) note] < 0);
+
+            if (isChordNote)
+            {
+                if (msg.isNoteOn())
+                {
+                    if (chordKeysDown++ == 0)
+                        chordMask = 0;
+
+                    chordMask = (uint16_t) (chordMask | (1u << (note % 12)));
+                }
+                else
+                {
+                    chordKeysDown = juce::jmax (0, chordKeysDown - 1);
+                }
+
+                chordMaskAtomic.store (chordMask);
+                vp.chordMask = chordMask;
+                continue;
+            }
+        }
+
         if (msg.isNoteOn())
         {
             lastMidiNote.store (msg.getNoteNumber());
@@ -412,6 +478,8 @@ void NeuroMPCProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
         }
     }
 
+    vp.chordMask = vp.chordMode != 0 ? chordMask : (uint16_t) 0;
+
     if (arpOn)
         arp.process (arpPos, numSamples, beatAt (arpPos), beatsPerSample, arpSink);
 
@@ -422,9 +490,17 @@ void NeuroMPCProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     {
         const auto mode = (int) seqModeParam->load();
         const auto running = mode == 1 ? hostPpq.has_value() : mode == 2;
-        auto seqSink = [&] (int offset, int note, float velocity, float pitch)
+        auto seqSink = [&] (int offset, int note, float velocity, float pitch, const neuro::SeqTarget& target)
         {
-            push (offset, velocity > 0.0f ? Event::noteOn : Event::noteOff, note, velocity);
+            // Resolve sound targets against the current kit: exact slice, or nearest slice on the timbre map.
+            auto slice = -1;
+
+            if (velocity > 0.0f && sl != nullptr)
+                slice = target.sliceId > 0 ? sl->indexOfId (target.sliceId)
+                      : target.x >= 0.0f   ? sl->nearestTimbre (target.x, target.y, target.drumClass)
+                                           : -1;
+
+            push (offset, velocity > 0.0f ? Event::noteOn : Event::noteOff, note, velocity, slice);
 
             if (numEvents > 0)
                 events[numEvents - 1].pitch = pitch;
@@ -481,13 +557,31 @@ void NeuroMPCProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
         events[j] = e;
     }
 
+    // ---- Output routing: each drum class renders to its own bus when the host enabled it, else to the main bus ----
+    neuro::OutputBuses outs;
+    auto mainBus = getBusBuffer (buffer, false, 0);
+    std::array<juce::AudioBuffer<float>, neuro::numDrumClasses> classBuses; // alias host channels; no allocation
+    outs.main = &mainBus;
+
+    for (int c = 0; c < neuro::numDrumClasses; ++c)
+    {
+        if (auto* bus = getBus (false, c + 1); bus != nullptr && bus->isEnabled())
+        {
+            classBuses[(size_t) c] = getBusBuffer (buffer, false, c + 1);
+            outs.classes[(size_t) c] = &classBuses[(size_t) c];
+        }
+
+        const auto db = classLevelParams[(size_t) c]->load();
+        outs.levels[(size_t) c] = db <= -59.9f ? 0.0f : juce::Decibels::decibelsToGain (db);
+    }
+
     // ---- Render between events ----
     auto handle = [&] (int note, float velocity, int slice, float pitch)
     {
         if (velocity <= 0.0f)
             engine.noteOff (note);
         else if (s != nullptr && sl != nullptr && slice >= 0)
-            engine.playSlice (slice, note, velocity, 0.0f, 0, *s, *sl, bank, vp);
+            engine.playSlice (slice, note, velocity, pitch, 0, *s, *sl, bank, vp);
         else if (s != nullptr && sl != nullptr)
             engine.noteOn (note, velocity, *s, *sl, bank, padMap, vp, pitch);
     };
@@ -497,7 +591,7 @@ void NeuroMPCProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     for (size_t i = 0; i < numEvents; ++i)
     {
         const auto& e = events[i];
-        renderWithModulation (buffer, pos, e.offset);
+        renderWithModulation (outs, pos, e.offset);
         pos = e.offset;
 
         if (e.type == Event::control)
@@ -513,14 +607,14 @@ void NeuroMPCProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
         }
     }
 
-    renderWithModulation (buffer, pos, numSamples);
+    renderWithModulation (outs, pos, numSamples);
 
     gainSmoothed.setTargetValue (juce::Decibels::decibelsToGain (gainParam->load()));
     gainSmoothed.applyGain (buffer, buffer.getNumSamples());
 }
 
 // Renders [from, to) in chunks, filling the per-sample global pitch offset: transpose + fine + bend + LFO.
-void NeuroMPCProcessor::renderWithModulation (juce::AudioBuffer<float>& buffer, int from, int to)
+void NeuroMPCProcessor::renderWithModulation (const neuro::OutputBuses& outs, int from, int to)
 {
     const auto base = transposeParam->load() + fineParam->load() / 100.0f + bendSemitones;
     const auto depth = lfoDepthParam->load();
@@ -550,7 +644,7 @@ void NeuroMPCProcessor::renderWithModulation (juce::AudioBuffer<float>& buffer, 
             }
         }
 
-        engine.render (buffer, from, n, modBuffer.data());
+        engine.render (outs, from, n, modBuffer.data());
         from += n;
     }
 }
@@ -901,6 +995,7 @@ bool NeuroMPCProcessor::loadSample (const juce::File& file, juce::String& error)
     rtSample.publish (sample);
     stretchCache.clear();
     stretchRequested.clear();
+    chordRequested.clear();
     analyses.clear();
     analysisRequested.clear();
     slices.reset (length);
@@ -1006,6 +1101,112 @@ void NeuroMPCProcessor::editSeqPattern (int index, const std::function<void (neu
 
     edit (seqPatterns[i]);
     rtSeq.publish (std::make_shared<const SeqBank> (seqPatterns));
+}
+
+NeuroMPCProcessor::DeconstructSummary NeuroMPCProcessor::deconstructLoop (int patternIndex, double bpm, float sensitivity)
+{
+    const std::scoped_lock lock (modelLock);
+    DeconstructSummary summary;
+
+    if (sample == nullptr || sample->length() < 64)
+        return summary;
+
+    const auto& buffer = sample->buffer;
+    const auto length = sample->length();
+    auto onsets = neuro::detectTransients (buffer.getArrayOfReadPointers(), buffer.getNumChannels(), length, sample->sampleRate, sensitivity);
+    slices.setStarts (onsets);
+
+    // Classify every hit now (the background analysis will confirm the same results later).
+    std::vector<const float*> channels ((size_t) buffer.getNumChannels());
+    float loudest = 1.0e-6f;
+    std::vector<float> peaks;
+
+    for (const auto& s : slices.getSlices())
+    {
+        for (int c = 0; c < buffer.getNumChannels(); ++c)
+            channels[(size_t) c] = buffer.getReadPointer (c, (int) s.startSample);
+
+        const auto features = neuro::analyseTimbre (channels.data(), (int) channels.size(), s.length(), sample->sampleRate);
+        const auto pitch = neuro::detectPitch (channels.data(), (int) channels.size(), s.length(), sample->sampleRate);
+        const auto pitched = pitch.status == neuro::PitchEstimate::Status::pitched;
+        slices.setAnalysis (s.id, s.startSample, s.endSample, (int) neuro::classify (features, pitched), features.mapX(), features.mapY(),
+                            pitched ? (float) pitch.midi : -1.0f);
+        peaks.push_back (buffer.getMagnitude ((int) s.startSample, (int) s.length()));
+        loudest = std::max (loudest, peaks.back());
+    }
+
+    publishSlices();
+
+    // Loop length: the nearest power-of-two number of beats at the given tempo; 1/16 steps (max 64).
+    const auto beats = (double) length / sample->sampleRate * bpm / 60.0;
+    auto loopBeats = 1;
+
+    for (int b : { 2, 4, 8, 16 })
+        if (std::abs (std::log2 (beats / b)) < std::abs (std::log2 (beats / loopBeats)))
+            loopBeats = b;
+
+    const auto steps = std::min (neuro::SeqLane::maxSteps, loopBeats * 4);
+    const auto stepLength = (double) length / steps;
+
+    neuro::SeqPattern pattern;
+    pattern.name = "Deconstructed";
+    pattern.numLanes = neuro::numDrumClasses;
+
+    for (int c = 0; c < neuro::numDrumClasses; ++c)
+    {
+        auto& lane = pattern.lanes[(size_t) c];
+        lane.note = neuro::PadBank::baseNote + c;
+        lane.drumClass = c;
+        lane.name = neuro::drumClassName ((neuro::DrumClass) c);
+        lane.length = steps;
+    }
+
+    for (size_t i = 0; i < slices.getSlices().size(); ++i)
+    {
+        const auto& s = slices.getSlices()[i];
+        const auto cls = std::clamp (s.effectiveClass(), 0, neuro::numDrumClasses - 1);
+        const auto step = juce::jlimit (0, steps - 1, (int) std::lround ((double) s.startSample / stepLength));
+        const auto micro = (float) juce::jlimit (-0.5, 0.5, ((double) s.startSample - step * stepLength) / stepLength);
+        const auto velocity = juce::jlimit (0.1f, 1.0f, peaks[i] / loudest);
+        auto& st = pattern.lanes[(size_t) cls].steps[(size_t) step];
+
+        if (! st.on || st.velocity < velocity) // two hits of one class on one step: keep the louder
+        {
+            st = { true, velocity, 1.0f, 1.0f, 1, micro, 0.0f };
+            st.sliceId = s.id;
+        }
+
+        ++summary.hits;
+        ++summary.perClass[(size_t) cls];
+    }
+
+    summary.steps = steps;
+    editSeqPattern (patternIndex, [&] (auto& p) { p = pattern; }, Undo::always);
+
+    auto* rate = apvts.getParameter (ParamIDs::seqRate); // the pattern is written in 1/16 steps
+    rate->setValueNotifyingHost (rate->convertTo0to1 (3.0f));
+    return summary;
+}
+
+int NeuroMPCProcessor::retargetPatternToTimbre (int patternIndex)
+{
+    int converted = 0;
+
+    editSeqPattern (patternIndex, [&] (auto& pattern)
+    {
+        for (auto& lane : pattern.lanes)
+            for (auto& st : lane.steps)
+                if (st.sliceId > 0)
+                    if (const auto i = slices.indexOfId (st.sliceId); i >= 0 && slices.getSlices()[(size_t) i].timbreX >= 0.0f)
+                    {
+                        st.timbreX = slices.getSlices()[(size_t) i].timbreX;
+                        st.timbreY = slices.getSlices()[(size_t) i].timbreY;
+                        st.sliceId = 0;
+                        ++converted;
+                    }
+    }, Undo::always);
+
+    return converted;
 }
 
 bool NeuroMPCProcessor::undoSeqPattern (int index)
@@ -1131,6 +1332,39 @@ void NeuroMPCProcessor::refreshStretch()
         }
     }
 
+    // Keep-length Chord-Lock: variants -6..+5 semitones for every eligible (tonal) slice.
+    if ((int) chordLockParam->load() == 2 && sample != nullptr)
+    {
+        for (const auto& s : slices.getSlices())
+        {
+            if (! neuro::chordLockEligible (s))
+                continue;
+
+            for (int k = -6; k <= 5; ++k)
+            {
+                if (k == 0)
+                    continue;
+
+                auto variant = s;
+                variant.pitchMode = neuro::PitchMode::keepLength;
+                variant.pitchSemitones = s.renderedPitch() + (float) k;
+                const auto key = neuro::StretchKey::of (variant);
+                auto cached = std::find_if (stretchCache.begin(), stretchCache.end(), [&] (const auto& c) { return c.entry.key == key; });
+
+                if (cached != stretchCache.end())
+                {
+                    cached->lastUse = ++cacheClock;
+                    bank->entries.push_back (cached->entry);
+                }
+                else if (std::find (chordRequested.begin(), chordRequested.end(), key) == chordRequested.end())
+                {
+                    chordRequested.push_back (key);
+                    stretchRenderer.request (1000000 + s.id * 16 + k + 6, { sample, sampleVersion, variant });
+                }
+            }
+        }
+    }
+
     size_t bytes = 0;
 
     for (const auto& c : stretchCache)
@@ -1165,6 +1399,8 @@ void NeuroMPCProcessor::refreshStretch()
 void NeuroMPCProcessor::processBackgroundResults()
 {
     processMidiQueues();
+    const std::scoped_lock lock (modelLock);
+    bool slicesAnalysed = false;
 
     for (auto& r : analyser.takeCompleted())
     {
@@ -1172,7 +1408,27 @@ void NeuroMPCProcessor::processBackgroundResults()
             analysisRequested.erase (it);
 
         if (r.sampleVersion == sampleVersion)
+        {
+            // Slices carry their class / timbre position / pitch so the audio thread can route and address them.
+            if (r.sliceId > 0)
+            {
+                const auto pitched = r.pitch.status == neuro::PitchEstimate::Status::pitched;
+                slicesAnalysed |= slices.setAnalysis (r.sliceId, r.start, r.end, (int) r.drumClass, r.timbre.mapX(), r.timbre.mapY(),
+                                                      pitched ? (float) r.pitch.midi : -1.0f);
+            }
+
             analyses[r.sliceId] = std::move (r);
+        }
+    }
+
+    if (slicesAnalysed)
+        rtSlices.publish (std::make_shared<const neuro::SliceSet> (slices)); // analysis data only: no re-analysis
+
+    // Chord-Lock variant renders depend on analysis (which slices are tonal) and on the mode.
+    if (const auto chordMode = (int) chordLockParam->load(); slicesAnalysed || chordMode != lastChordMode)
+    {
+        lastChordMode = chordMode;
+        refreshStretch();
     }
 
     auto results = stretchRenderer.takeCompleted();
@@ -1180,6 +1436,7 @@ void NeuroMPCProcessor::processBackgroundResults()
     for (auto& r : results)
     {
         std::erase (stretchRequested, r.entry.key);
+        std::erase (chordRequested, r.entry.key);
 
         if (r.sampleVersion == sampleVersion && r.entry.audio != nullptr)
             stretchCache.push_back ({ std::move (r.entry), ++cacheClock });
@@ -1199,7 +1456,7 @@ bool NeuroMPCProcessor::waitForBackgroundWork (int timeoutMs)
     {
         processBackgroundResults();
 
-        if (stretchRequested.empty() && stretchRenderer.isIdle() && analysisRequested.empty() && analyser.isIdle())
+        if (stretchRequested.empty() && chordRequested.empty() && stretchRenderer.isIdle() && analysisRequested.empty() && analyser.isIdle())
             return true;
 
         juce::Thread::sleep (2);
@@ -1267,6 +1524,7 @@ juce::ValueTree NeuroMPCProcessor::createStateTree() const
         t.setProperty ("stretch", s.timeStretchRatio, nullptr);
         t.setProperty ("preserveTransients", s.preserveTransients, nullptr);
         t.setProperty ("rootNote", s.rootNote, nullptr);
+        t.setProperty ("drumClass", s.drumClass, nullptr);
         t.setProperty ("reverse", s.reverse, nullptr);
         t.setProperty ("enabled", s.enabled, nullptr);
         sliceTree.appendChild (t, nullptr);
@@ -1345,6 +1603,7 @@ juce::ValueTree NeuroMPCProcessor::createStateTree() const
             lt.setProperty ("length", lane.length, nullptr);
             lt.setProperty ("mute", lane.mute, nullptr);
             lt.setProperty ("name", juce::String (lane.name), nullptr);
+            lt.setProperty ("class", lane.drumClass, nullptr);
 
             for (int si = 0; si < neuro::SeqLane::maxSteps; ++si)
             {
@@ -1361,6 +1620,9 @@ juce::ValueTree NeuroMPCProcessor::createStateTree() const
                 t.setProperty ("ratchet", st.ratchet, nullptr);
                 t.setProperty ("micro", st.micro, nullptr);
                 t.setProperty ("pitch", st.pitch, nullptr);
+
+                if (st.sliceId > 0)       t.setProperty ("slice", st.sliceId, nullptr);
+                if (st.timbreX >= 0.0f) { t.setProperty ("tx", st.timbreX, nullptr); t.setProperty ("ty", st.timbreY, nullptr); }
 
                 if (st.condition != neuro::SeqCondition::always)
                 {
@@ -1478,6 +1740,7 @@ bool NeuroMPCProcessor::applyStateTree (juce::ValueTree root)
                 lane.length = juce::jlimit (1, neuro::SeqLane::maxSteps, (int) lt.getProperty ("length", 16));
                 lane.mute = lt.getProperty ("mute", false);
                 lane.name = lt.getProperty ("name", "").toString().toStdString();
+                lane.drumClass = juce::jlimit (-1, neuro::numDrumClasses - 1, (int) lt.getProperty ("class", -1));
 
                 for (const auto& t : lt)
                 {
@@ -1492,6 +1755,9 @@ bool NeuroMPCProcessor::applyStateTree (juce::ValueTree root)
                     st.condition = (neuro::SeqCondition) juce::jlimit (0, 7, (int) t.getProperty ("cond", 0));
                     st.condA = juce::jlimit (1, 16, (int) t.getProperty ("condA", 1));
                     st.condB = juce::jlimit (1, 16, (int) t.getProperty ("condB", 2));
+                    st.sliceId = juce::jmax (0, (int) t.getProperty ("slice", 0));
+                    st.timbreX = juce::jlimit (-1.0f, 1.0f, (float) t.getProperty ("tx", -1.0f));
+                    st.timbreY = juce::jlimit (-1.0f, 1.0f, (float) t.getProperty ("ty", -1.0f));
                 }
             }
         }
@@ -1582,6 +1848,7 @@ void NeuroMPCProcessor::restoreSlicesFrom (const juce::ValueTree& sliceTree)
         s.timeStretchRatio = t.getProperty ("stretch", 1.0f);
         s.preserveTransients = t.getProperty ("preserveTransients", true);
         s.rootNote = t.getProperty ("rootNote", -1.0f);
+        s.drumClass = juce::jlimit (-1, neuro::numDrumClasses - 1, (int) t.getProperty ("drumClass", -1));
         s.reverse = t.getProperty ("reverse", false);
         s.enabled = t.getProperty ("enabled", true);
         restored.push_back (s);

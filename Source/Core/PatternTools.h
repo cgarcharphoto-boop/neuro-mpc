@@ -105,7 +105,7 @@ inline void applyProbabilityProfile (SeqLane& lane, float offbeatProbability)
 
 enum Gene : uint32_t
 {
-    rhythm = 1, velocity = 2, pitch = 4, groove = 8, chance = 16, ratchet = 32, gate = 64, allGenes = 127
+    rhythm = 1, velocity = 2, pitch = 4, groove = 8, chance = 16, ratchet = 32, gate = 64, timbre = 128, allGenes = 255
 };
 
 // A lane as explicit properties: where events happen (rhythm) and per-event contours, in event order.
@@ -181,6 +181,16 @@ inline Genome combine (const Genome& base, const Genome& donor, uint32_t fromDon
     if (fromDonor & chance)   g.chance = donor.chance;
     if (fromDonor & ratchet)  g.ratchet = donor.ratchet;
     if (fromDonor & gate)     g.gate = donor.gate;
+
+    if ((fromDonor & timbre) && ! donor.extras.empty())   // sound targets travel per event, in event order
+        for (size_t e = 0; e < g.extras.size(); ++e)
+        {
+            const auto& d = donor.extras[e % donor.extras.size()];
+            g.extras[e].sliceId = d.sliceId;
+            g.extras[e].timbreX = d.timbreX;
+            g.extras[e].timbreY = d.timbreY;
+        }
+
     return g;
 }
 
@@ -283,6 +293,13 @@ inline void mutate (SeqLane& lane, const MutationSettings& m)
 
         if ((m.genes & gate) && e < g.gate.size() && roll (step, gate))
             g.gate[e] = std::clamp (g.gate[e] + 0.3f * spread (step, gate), 0.05f, 1.0f);
+
+        // Timbre: moves a timbre-addressed step through sound space (on the 2D map).
+        if ((m.genes & timbre) && e < g.extras.size() && g.extras[e].timbreX >= 0.0f && roll (step, timbre))
+        {
+            g.extras[e].timbreX = std::clamp (g.extras[e].timbreX + 0.25f * spread (step, timbre), 0.0f, 1.0f);
+            g.extras[e].timbreY = std::clamp (g.extras[e].timbreY + 0.25f * spread (step, 300 + timbre), 0.0f, 1.0f);
+        }
     }
 
     express (lane, g);

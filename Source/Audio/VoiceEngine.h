@@ -4,6 +4,7 @@
 #include "../Core/PadBank.h"
 #include "../Core/Scales.h"
 #include "../Core/SliceSet.h"
+#include "../Core/Timbre.h"
 #include "../DSP/TimeStretch.h"
 #include <array>
 #include <atomic>
@@ -23,6 +24,50 @@ struct VoiceParams
     float keyboardRoot = 60.0f;    // fractional, so a detuned sample plays in tune
     uint16_t scaleMask = 0xFFF;
     int scaleRoot = 0;
+
+    // Chord-Lock: tonal slices retune to the nearest tone of the held chord (pitch-class mask; 0 = no chord).
+    int chordMode = 0;            // 0 off, 1 resample, 2 keep length (renders, resample while pending)
+    uint16_t chordMask = 0;
+};
+
+// Chord-Lock: semitones to move `midi` to the nearest pitch class in `mask` (0 when the mask is empty).
+inline float chordLockOffset (float midi, uint16_t mask) noexcept
+{
+    if ((mask & 0xFFF) == 0)
+        return 0.0f;
+
+    auto best = 0.0f, bestDistance = 1.0e9f;
+
+    for (int d = -7; d <= 7; ++d)
+    {
+        const auto note = (int) std::lround (midi) + d;
+
+        if ((mask >> (((note % 12) + 12) % 12)) & 1u)
+            if (const auto distance = std::abs ((float) note - midi); distance < bestDistance)
+            {
+                bestDistance = distance;
+                best = (float) note - midi;
+            }
+    }
+
+    return best;
+}
+
+// Slices that Chord-Lock may retune: a known root and not a drum.
+inline bool chordLockEligible (const SliceDefinition& s) noexcept
+{
+    const auto cls = s.effectiveClass();
+    return (s.rootNote >= 0.0f || s.detectedRoot >= 0.0f) && (cls < 0 || cls == (int) DrumClass::tonal);
+}
+
+// Where voices render: each drum class can have its own output (nullptr = main) and level.
+struct OutputBuses
+{
+    juce::AudioBuffer<float>* main = nullptr;
+    std::array<juce::AudioBuffer<float>*, numDrumClasses> classes {};
+    std::array<float, numDrumClasses> levels;
+
+    OutputBuses() { levels.fill (1.0f); }
 };
 
 // Fixed-size polyphonic slice player. All methods except getPlayhead() are audio-thread only.
@@ -48,7 +93,7 @@ public:
     // Stops voices reading renders that are no longer in the published bank (they may be freed).
     void dropVoicesNotIn (const StretchBank*, const juce::AudioBuffer<float>* sampleBuffer) noexcept;
     // modSemitones: per-sample global pitch offset (transpose, bend, LFO) applied to every voice by resampling.
-    void render (juce::AudioBuffer<float>& out, int startSample, int numSamples, const float* modSemitones) noexcept;
+    void render (const OutputBuses& out, int startSample, int numSamples, const float* modSemitones) noexcept;
 
     // Any thread: original-sample position of the most recently started active voice, or -1.
     int64_t getPlayhead() const noexcept { return playhead.load (std::memory_order_relaxed); }
@@ -65,6 +110,7 @@ private:
         double pos = 0.0, baseRate = 1.0; // baseRate is negative for reverse playback
         float gain = 0.0f, env = 0.0f, attackStep = 1.0f, releaseStep = 1.0f;
         int chokeGroup = 0;
+        int drumClass = -1;
         uint64_t order = 0;
     };
 

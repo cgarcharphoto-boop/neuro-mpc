@@ -172,7 +172,7 @@ NeuroMPCEditor::NeuroMPCEditor (NeuroMPCProcessor& p) : AudioProcessorEditor (p)
 
     bankButtons[0].setToggleState (true, juce::dontSendNotification);
 
-    for (auto* tab : { &sliceTab, &padTab, &arpTab, &genTab, &seqTab, &evolveTab })
+    for (auto* tab : { &sliceTab, &padTab, &arpTab, &genTab, &seqTab, &evolveTab, &kitTab })
     {
         tab->setRadioGroupId (2);
         tab->setClickingTogglesState (true);
@@ -186,6 +186,105 @@ NeuroMPCEditor::NeuroMPCEditor (NeuroMPCProcessor& p) : AudioProcessorEditor (p)
     genTab.onClick   = [this] { showPanel (Panel::gen); };
     seqTab.onClick   = [this] { showPanel (Panel::seq); };
     evolveTab.onClick = [this] { showPanel (Panel::evolve); };
+    kitTab.onClick    = [this] { showPanel (Panel::kit); };
+
+    // ---- Kit panel ----
+    for (auto* c : kitPanelComponents())
+        addAndMakeVisible (c);
+
+    kitTitle.setText ("KIT", juce::dontSendNotification);
+    kitTitle.setFont (juce::FontOptions (14.0f, juce::Font::bold));
+    kitInfo.setJustificationType (juce::Justification::topLeft);
+    timbreMap.onSliceClicked = [this] (int index)
+    {
+        waveform.setSelectedSlice (index);
+        timbreMap.selected = index;
+        proc.stopAudition (proc.startSliceAudition (index));
+        updateKitPanel();
+    };
+
+    sliceClass.addItem ("Class: detected", 1);
+    for (int c = 0; c < neuro::numDrumClasses; ++c)
+        sliceClass.addItem (juce::String ("Class: ") + neuro::drumClassName ((neuro::DrumClass) c), c + 2);
+    sliceClass.setTooltip ("Override the detected class of the selected slice (routes it to that class's output)");
+    sliceClass.onChange = [this]
+    {
+        const auto sel = waveform.getSelectedSlice();
+        if (sel >= 0) proc.editSlices ([sel, cls = sliceClass.getSelectedId() - 2] (auto& set) { set.setDrumClass (sel, cls); });
+    };
+
+    laneClass.addItem ("Lane class: any", 1);
+    for (int c = 0; c < neuro::numDrumClasses; ++c)
+        laneClass.addItem (juce::String ("Lane class: ") + neuro::drumClassName ((neuro::DrumClass) c), c + 2);
+    laneClass.setTooltip ("Timbre targets in the selected sequencer lane only pick slices of this class");
+    laneClass.onChange = [this]
+    {
+        proc.editSeqPattern (proc.getSelectedSeqPattern(), [this, cls = laneClass.getSelectedId() - 2] (auto& pat)
+                             { pat.lanes[(size_t) seqGrid.selectedLane].drumClass = cls; });
+    };
+
+    hitSensitivity.setRange (0.1, 1.0, 0.01);
+    hitSensitivity.setValue (0.7, juce::dontSendNotification);
+    hitSensitivity.setTooltip ("Hit detection sensitivity for the Loop Deconstructor");
+    deconstructButton.setTooltip ("Slice the loop at its hits, classify each hit, and write a pattern with one lane per kit piece (keeps the groove)");
+    deconstructButton.onClick = [this]
+    {
+        const auto r = proc.deconstructLoop (proc.getSelectedSeqPattern(), proc.getLastHostBpm(), (float) hitSensitivity.getValue());
+        juce::String text;
+        text << r.hits << " hits -> " << r.steps << "-step pattern " << (proc.getSelectedSeqPattern() + 1) << ":";
+        for (int c = 0; c < neuro::numDrumClasses; ++c)
+            if (r.perClass[(size_t) c] > 0) text << "  " << neuro::drumClassName ((neuro::DrumClass) c) << " " << r.perClass[(size_t) c];
+        kitInfo.setText (r.hits > 0 ? text : juce::String ("Load a loop first"), juce::dontSendNotification);
+    };
+    retargetButton.setTooltip ("Turn exact-slice steps into timbre points: the pattern then re-orchestrates itself on any kit");
+    retargetButton.onClick = [this]
+    {
+        kitInfo.setText (juce::String (proc.retargetPatternToTimbre (proc.getSelectedSeqPattern())) + " steps retargeted to timbre",
+                         juce::dontSendNotification);
+    };
+
+    auto targetStep = [this] (int mode)
+    {
+        const auto sel = waveform.getSelectedSlice();
+        const auto& slices = proc.getSlices().getSlices();
+        const auto valid = sel >= 0 && sel < (int) slices.size();
+        editSelectedSeqStep ([&] (auto& st)
+        {
+            st.sliceId = mode == 1 && valid ? slices[(size_t) sel].id : 0;
+            st.timbreX = mode == 2 && valid ? slices[(size_t) sel].timbreX : -1.0f;
+            st.timbreY = mode == 2 && valid ? slices[(size_t) sel].timbreY : -1.0f;
+        });
+        updateKitPanel();
+    };
+    stepToSlice.setTooltip ("Selected sequencer step plays the selected slice");
+    stepToTimbre.setTooltip ("Selected sequencer step plays the nearest sound to the selected slice's timbre (any kit)");
+    stepToPad.setTooltip ("Selected sequencer step plays its lane's pad again");
+    stepToSlice.onClick  = [targetStep] { targetStep (1); };
+    stepToTimbre.onClick = [targetStep] { targetStep (2); };
+    stepToPad.onClick    = [targetStep] { targetStep (0); };
+
+    for (int c = 0; c < neuro::numDrumClasses; ++c)
+    {
+        auto& knob = classLevels[(size_t) c];
+        knobLabels.push_back (setupKnob (knob, *this, neuro::drumClassName ((neuro::DrumClass) c)));
+        knob.setTextBoxStyle (juce::Slider::TextBoxBelow, false, 56, 14);
+        attachSlider (knob, ParamIDs::classLevel[c]);
+    }
+
+    chordMode.addItemList ({ "Chord-Lock: off", "Chord-Lock: resample", "Chord-Lock: keep length" }, 1);
+    chordInput.addItemList ({ "Chord from: non-pad notes", "Chord from: below split" }, 1);
+    attachCombo (chordMode, ParamIDs::chordLock);
+    attachCombo (chordInput, ParamIDs::chordInput);
+    attachSlider (chordSplit, ParamIDs::chordSplit);
+
+    for (auto [slider, name] : std::initializer_list<std::pair<juce::Slider*, const char*>> { { &hitSensitivity, "Hits" }, { &chordSplit, "Split" } })
+    {
+        slider->setTextBoxStyle (juce::Slider::TextBoxRight, false, 52, 20);
+        auto label = std::make_unique<juce::Label> (name, name);
+        label->setFont (juce::FontOptions (11.0f));
+        label->attachToComponent (slider, true);
+        knobLabels.push_back (std::move (label));
+    }
 
     // ---- SEQ additions: step condition, fill, undo ----
     stepCondition.addItemList ({ "Cond: always", "Cond: 1:2", "Cond: 2:2", "Cond: 1:3", "Cond: 2:3", "Cond: 3:3", "Cond: 1:4", "Cond: 2:4",
@@ -960,7 +1059,9 @@ void NeuroMPCEditor::registerMappables()
              { &evolveRedo, "evolve.redo" }, { &curveDepth, "evolve.curveDepth" }, { &offbeatChance, "evolve.offbeatChance" },
              { &mutIntensity, "evolve.intensity" }, { &mutPreserve, "evolve.preserve" }, { &mutDensity, "evolve.density" },
              { &mutPitch, "evolve.pitchRange" }, { &mutVelocity, "evolve.velocityRange" }, { &mutTiming, "evolve.timingRange" },
-             { &mutSeed, "evolve.seed" } })
+             { &mutSeed, "evolve.seed" }, { &kitTab, "view.kit" }, { &sliceClass, "kit.sliceClass" }, { &laneClass, "kit.laneClass" },
+             { &hitSensitivity, "kit.hitSensitivity" }, { &deconstructButton, "kit.deconstruct" }, { &retargetButton, "kit.retarget" },
+             { &stepToSlice, "kit.stepToSlice" }, { &stepToTimbre, "kit.stepToTimbre" }, { &stepToPad, "kit.stepToPad" } })
         id (*c, name);
 
     for (int pc = 0; pc < 12; ++pc)
@@ -1354,6 +1455,42 @@ std::vector<juce::Component*> NeuroMPCEditor::seqPanelComponents()
     return list;
 }
 
+std::vector<juce::Component*> NeuroMPCEditor::kitPanelComponents()
+{
+    std::vector<juce::Component*> list { &timbreMap, &kitTitle, &kitInfo, &chordInfo, &sliceClass, &laneClass, &chordMode, &chordInput,
+                                         &hitSensitivity, &chordSplit, &deconstructButton, &retargetButton, &stepToSlice, &stepToTimbre, &stepToPad };
+
+    for (auto& k : classLevels)
+        list.push_back (&k);
+
+    return list;
+}
+
+void NeuroMPCEditor::updateKitPanel()
+{
+    const auto sel = waveform.getSelectedSlice();
+    const auto& slices = proc.getSlices().getSlices();
+    timbreMap.selected = sel;
+    timbreMap.repaint();
+
+    if (sel >= 0 && sel < (int) slices.size())
+    {
+        const auto& s = slices[(size_t) sel];
+        sliceClass.setSelectedId (s.drumClass + 2, juce::dontSendNotification);
+        sliceClass.changeItemText (1, s.detectedClass >= 0 ? juce::String ("Class: detected (") + neuro::drumClassName ((neuro::DrumClass) s.detectedClass) + ")"
+                                                           : juce::String ("Class: detected (analysing...)"));
+    }
+
+    laneClass.setSelectedId (proc.getSeqPattern (proc.getSelectedSeqPattern()).lanes[(size_t) seqGrid.selectedLane].drumClass + 2,
+                             juce::dontSendNotification);
+
+    const auto chord = proc.getHeldChord();
+    juce::StringArray names;
+    for (int pc = 0; pc < 12; ++pc)
+        if ((chord >> pc) & 1) names.add (neuro::pitchClassName (pc));
+    chordInfo.setText ("Held chord: " + (names.isEmpty() ? juce::String ("none") : names.joinIntoString (" ")), juce::dontSendNotification);
+}
+
 std::vector<juce::Component*> NeuroMPCEditor::evolvePanelComponents()
 {
     std::vector<juce::Component*> list { &evolveTitle, &mutateTitle, &weaveTitle, &genomeInfo, &evolveScope, &velocityCurve,
@@ -1484,6 +1621,7 @@ void NeuroMPCEditor::showPanel (Panel p)
     for (auto* c : genPanelComponents())   c->setVisible (p == Panel::gen);
     for (auto* c : seqPanelComponents())   c->setVisible (p == Panel::seq);
     for (auto* c : evolvePanelComponents()) c->setVisible (p == Panel::evolve);
+    for (auto* c : kitPanelComponents())    c->setVisible (p == Panel::kit);
 
     info.setVisible (p == Panel::slice || p == Panel::pad || p == Panel::arp); // the others use the info area too
 
@@ -1493,12 +1631,14 @@ void NeuroMPCEditor::showPanel (Panel p)
     genTab.setToggleState (p == Panel::gen, juce::dontSendNotification);
     seqTab.setToggleState (p == Panel::seq, juce::dontSendNotification);
     evolveTab.setToggleState (p == Panel::evolve, juce::dontSendNotification);
+    kitTab.setToggleState (p == Panel::kit, juce::dontSendNotification);
 
     if (p == Panel::pad) updatePadPanel();
     if (p == Panel::arp) updateArpPanel();
     if (p == Panel::gen) updateGenPanel();
     if (p == Panel::seq) updateSeqPanel();
     if (p == Panel::evolve) updateEvolvePanel();
+    if (p == Panel::kit) updateKitPanel();
 }
 
 void NeuroMPCEditor::updateArpPanel()
@@ -1699,6 +1839,7 @@ void NeuroMPCEditor::timerCallback()
     if (activePanel == Panel::arp) gesturePad.repaint();
     if (activePanel == Panel::seq) updateSeqPanel();
     if (activePanel == Panel::evolve) updateEvolvePanel();
+    if (activePanel == Panel::kit) updateKitPanel();
 
     updateInfo();
     updateSlicePanel();
@@ -1797,6 +1938,7 @@ void NeuroMPCEditor::resized()
     genTab.setBounds (tabs.removeFromLeft (70));
     seqTab.setBounds (tabs.removeFromLeft (70));
     evolveTab.setBounds (tabs.removeFromLeft (76));
+    kitTab.setBounds (tabs.removeFromLeft (60));
     titleArea = tabs;
     bottom.removeFromTop (6);
     const auto panelArea = bottom.removeFromTop (142);
@@ -2027,6 +2169,45 @@ void NeuroMPCEditor::resized()
 
         ep.removeFromTop (8);
         genomeInfo.setBounds (ep);
+    }
+
+    // Kit panel: timbre map on the left, controls on the right; also uses the info area.
+    {
+        auto kp = panelArea.withBottom (bottom.getBottom());
+        timbreMap.setBounds (kp.removeFromLeft (juce::jmin (kp.getHeight(), 300)));
+        kp.removeFromLeft (12);
+        auto row = [&kp] (int h = 24) { auto r = kp.removeFromTop (h); kp.removeFromTop (6); return r; };
+        auto r0 = row();
+        kitTitle.setBounds (r0.removeFromLeft (50));
+        sliceClass.setBounds (r0.removeFromLeft (200));
+        r0.removeFromLeft (6);
+        laneClass.setBounds (r0.removeFromLeft (180));
+        auto r1 = row();
+        deconstructButton.setBounds (r1.removeFromLeft (130));
+        r1.removeFromLeft (48);
+        hitSensitivity.setBounds (r1.removeFromLeft (150));
+        r1.removeFromLeft (6);
+        retargetButton.setBounds (r1.removeFromLeft (130));
+        auto r2 = row();
+        for (auto* b : { &stepToSlice, &stepToTimbre, &stepToPad })
+        {
+            b->setBounds (r2.removeFromLeft (110));
+            r2.removeFromLeft (6);
+        }
+        auto r3 = row();
+        chordMode.setBounds (r3.removeFromLeft (190));
+        r3.removeFromLeft (6);
+        chordInput.setBounds (r3.removeFromLeft (190));
+        r3.removeFromLeft (44);
+        chordSplit.setBounds (r3.removeFromLeft (130));
+        auto r4 = row (20);
+        chordInfo.setBounds (r4.removeFromLeft (220));
+        kitInfo.setBounds (r4);
+        kp.removeFromTop (14);                        // knob labels sit above
+        auto classKnobRow = kp.removeFromTop (64);
+        const auto w = classKnobRow.getWidth() / neuro::numDrumClasses;
+        for (auto& k : classLevels)
+            k.setBounds (classKnobRow.removeFromLeft (w));
     }
 
     auto ap = panelArea;

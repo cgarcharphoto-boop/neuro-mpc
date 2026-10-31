@@ -3,7 +3,7 @@
 An open-source, MPC-style slice sampler for macOS: VST3 (Ableton Live), AU (Logic Pro), and Standalone.
 C++20 · JUCE 9.0.4 (pinned) · CMake. The master spec lives in `../gmni sampler/`.
 
-## Status: v0.2.0, all 15 specification phases plus full MIDI mapping
+## Status: v0.3.0, all 15 specification phases, full MIDI mapping, kit intelligence
 
 The acceptance status of each requirement, with evidence, is in [Documentation/ACCEPTANCE.md](Documentation/ACCEPTANCE.md). **Still open:** testing in Ableton Live and Logic Pro, a pluginval run on the VST3, and listening and UI usability tests.
 
@@ -21,6 +21,7 @@ The acceptance status of each requirement, with evidence, is in [Documentation/A
 | Arpeggiator | 10 directions, 1/1–1/32 with triplets, gate, octaves, MPC swing, probability, repeats, latch, retrigger, seeded randomness; locked to host PPQ or free-running from the key press; note-offs in samples (no stuck notes on loops). Generative: 16-step rhythm pattern with accents/ratchets and Euclid, inspectable Arpeggio Grammar rules with presets, Phrase Memory with seeded variation, humanise, gesture XY pad. See [Documentation/ARPEGGIATOR.md](Documentation/ARPEGGIATOR.md) |
 | Step sequencer | 16 patterns × 16 lanes, per-lane length (polymeter) and mute, per-step velocity/gate/probability/ratchet/microtiming/pitch, swing, host-transport or free-running; stateless deterministic timing. Advanced: trig conditions (A:B, first, fill, previous), transformations with undo/redo, Pattern Genome recombination, seeded Mutation with A/B compare, Phrase Weaving. See [Documentation/SEQUENCER.md](Documentation/SEQUENCER.md) |
 | MIDI mapping | MIDI Learn for every control (182, enforced by test); parameter mappings work with the editor closed; hardware pads follow pad banks A–D via a learned pad layout; measured Akai MPK mini mk2 template. See [Documentation/MIDI_MAPPING.md](Documentation/MIDI_MAPPING.md) |
+| Kit intelligence | Sound fingerprints + drum classes (kick, snare, hats, toms, crash, ride…) with a timbre map; **Timbre-Addressed Sequencing** (patterns re-orchestrate on any kit); **Loop Deconstructor** (loop → one lane per kit piece, groove kept); **12 outputs** (one per class) for mixing; **Chord-Lock** (tonal slices follow your chord). See [Documentation/KIT.md](Documentation/KIT.md) |
 | Real-time safety | No locks, file I/O or allocation on the audio thread. Samples and slices reach the audio thread through `RtShared` (hazard-pointer handoff); UI note input goes through a lock-free FIFO |
 
 **Validation:**
@@ -37,7 +38,7 @@ The acceptance status of each requirement, with evidence, is in [Documentation/A
 | [ARCHITECTURE](Documentation/ARCHITECTURE.md) | threads, ownership, block processing, modules |
 | [BUILD](Documentation/BUILD.md) · [TESTING](Documentation/TESTING.md) · [ACCEPTANCE](Documentation/ACCEPTANCE.md) | build, test and release status |
 | [TIME_STRETCHING](Documentation/TIME_STRETCHING.md) · [PITCH_ANALYSIS](Documentation/PITCH_ANALYSIS.md) · [PITCH_SHIFTING](Documentation/PITCH_SHIFTING.md) | DSP, with measured results |
-| [PADS](Documentation/PADS.md) · [ARPEGGIATOR](Documentation/ARPEGGIATOR.md) · [SEQUENCER](Documentation/SEQUENCER.md) | performance features |
+| [PADS](Documentation/PADS.md) · [ARPEGGIATOR](Documentation/ARPEGGIATOR.md) · [SEQUENCER](Documentation/SEQUENCER.md) · [KIT](Documentation/KIT.md) | performance features |
 | [STATE_AND_AUTOMATION](Documentation/STATE_AND_AUTOMATION.md) · [MIDI_MAPPING](Documentation/MIDI_MAPPING.md) · [LICENSES](Documentation/LICENSES.md) | parameters, state, presets, MIDI learn, licences |
 | [CONTRIBUTING](CONTRIBUTING.md) · [CHANGELOG](CHANGELOG.md) · [SECURITY](SECURITY.md) | project |
 

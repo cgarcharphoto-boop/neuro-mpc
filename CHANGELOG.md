@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.0 (2026-10-30): kit intelligence
+- **Sound fingerprints and drum classes** per slice (11 classes), with a timbre map and per-slice class override.
+- **Timbre-Addressed Sequencing:** steps target a slice or a timbre point resolved on the current kit; Retarget to timbre; a timbre gene for Mutation.
+- **Loop Deconstructor:** loop → pattern with one lane per kit piece, keeping velocity and groove.
+- **12 stereo outputs** (Main plus one per class), with automatable per-class levels.
+- **Chord-Lock:** tonal slices retune to the held chord (Resample or Keep length with pre-rendered variants).
+- **KIT tab;** 14 new parameters (63 total); 205 MIDI-mappable controls.
+
 ## 0.2.0 (2026-10-29): MIDI mapping
 - **MIDI Learn for every control:** 182 buttons, sliders and selectors, enforced by a test. Mapped messages are consumed. Parameter mappings run on the audio thread (and work with the editor closed); other controls run on the message thread.
 - **Hardware pad banks:** "pads follow bank" plays NEURO pad *n* of the selected bank A–D, positionally. The bank selector is a mappable parameter (`padBank`), there is a learned hardware pad layout, and a pad MIDI channel filter (`padBankFollow`, `padChannel`).

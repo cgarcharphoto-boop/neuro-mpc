@@ -56,6 +56,42 @@ namespace
         return file;
     }
 
+    // Synthetic kit file: kick @0, snare @0.25 s, closed hat @0.5 s, kick @0.75 s (each 0.25 s), mono 48 kHz.
+    juce::File writeKitWav (const juce::File& file, std::vector<int> order = { 0, 1, 2, 0 })
+    {
+        juce::AudioBuffer<float> buf (1, (int) (rate * 0.25 * (double) order.size()));
+        buf.clear();
+        juce::Random rng (3);
+        float hp = 0.0f, prev = 0.0f, lp = 0.0f, lp2 = 0.0f;
+
+        for (size_t h = 0; h < order.size(); ++h)
+        {
+            float phase = 0.0f;
+
+            for (int i = 0; i < (int) (rate * 0.25); ++i)
+            {
+                const auto t = (float) i / (float) rate;
+                const auto n = rng.nextFloat() * 2.0f - 1.0f;
+                float v = 0.0f;
+
+                if (order[h] == 0)      { phase += 6.2831853f * (50.0f + 70.0f * std::exp (-t / 0.03f)) / (float) rate; v = std::sin (phase) * std::exp (-t / 0.12f); }
+                else if (order[h] == 1) { lp += 0.54f * (n - lp); lp2 += 0.1f * (n - lp2);
+                                          v = 0.4f * std::sin (6.2831853f * 190.0f * t) * std::exp (-t / 0.06f) + 1.2f * (lp - lp2) * std::exp (-t / 0.12f); }
+                else                    { hp = 0.98f * (hp + n - prev); prev = n; lp += 0.6f * (hp - lp); v = (hp - lp) * std::exp (-t / 0.025f); }
+
+                buf.setSample (0, (int) h * (int) (rate * 0.25) + i, 0.8f * v);
+            }
+        }
+
+        file.deleteFile();
+        juce::WavAudioFormat wav;
+        std::unique_ptr<juce::OutputStream> out (file.createOutputStream().release());
+        auto options = juce::AudioFormatWriterOptions().withSampleRate (rate).withNumChannels (1).withBitsPerSample (24);
+        if (auto writer = wav.createWriterFor (out, options))
+            writer->writeFromAudioSampleBuffer (buf, 0, buf.getNumSamples());
+        return file;
+    }
+
     struct Run { int nonZero = 0; float peak = 0.0f; bool finite = true; };
 
     // Renders numBlocks blocks; events = (block index, note, velocity) at sample offset 0.
@@ -786,7 +822,8 @@ int main()
             "arpGate", "arpOctaves", "arpSwing", "arpProbability", "arpRepeats", "arpVelocity", "arpRetrigger", "arpSeed", "arpAccent",
             "arpPhrase", "arpVariation", "arpVaryPitch", "arpVaryVelocity", "arpVaryRhythm", "arpReturn", "arpHumanTime",
             "arpHumanVelocity", "seqMode", "seqPattern", "seqRate", "seqSwing", "seqFill", "weaveAccent", "weaveAccentAmount",
-            "weaveFill", "weaveFillEvery", "weavePitch", "padBank", "padBankFollow", "padChannel" };
+            "weaveFill", "weaveFillEvery", "weavePitch", "padBank", "padBankFollow", "padChannel", "levelKick", "levelSnare",
+            "levelClosedHat", "levelOpenHat", "levelTom1", "levelTom2", "levelFloorTom", "levelCrash", "levelRide", "levelPerc", "levelTonal", "chordLock", "chordInput", "chordSplit" };
         NeuroMPCProcessor a;
         juce::StringArray ids;
         for (auto* param : a.getParameters())
@@ -1103,6 +1140,180 @@ int main()
         restoredMap.setStateInformation (st.getData(), (int) st.getSize());
         CHECK (restoredMap.getMidiMap().getBindings().size() == mm.getMidiMap().getBindings().size());
         CHECK (restoredMap.getHardwarePadNotes() == mm.getHardwarePadNotes());
+    }
+
+    // ---- Timbre analysis on slices + per-class output buses ----
+    {
+        auto kitFile = writeKitWav (juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("neuro_kit.wav"));
+        NeuroMPCProcessor kt;
+        CHECK (kt.loadSample (kitFile, error));
+        kt.editSlices ([] (auto& s) { s.grid (4); });
+        CHECK (kt.waitForBackgroundWork (20000));
+        const auto& sl = kt.getSlices().getSlices();
+        std::printf ("  kit slices: %s %s %s %s\n", neuro::drumClassName ((neuro::DrumClass) sl[0].effectiveClass()),
+                     neuro::drumClassName ((neuro::DrumClass) sl[1].effectiveClass()), neuro::drumClassName ((neuro::DrumClass) sl[2].effectiveClass()),
+                     neuro::drumClassName ((neuro::DrumClass) sl[3].effectiveClass()));
+        CHECK (sl[0].effectiveClass() == (int) neuro::DrumClass::kick && sl[1].effectiveClass() == (int) neuro::DrumClass::snare);
+        CHECK (sl[2].effectiveClass() == (int) neuro::DrumClass::closedHat && sl[3].effectiveClass() == (int) neuro::DrumClass::kick);
+        CHECK (sl[2].timbreX > sl[0].timbreX + 0.3f && sl[0].timbreX >= 0.0f);                    // hat brighter than kick
+        CHECK (kt.getSlices().nearestTimbre (0.0f, 0.0f) == 0 || kt.getSlices().nearestTimbre (0.0f, 0.0f) == 3); // darkest = a kick
+        CHECK (kt.getSlices().nearestTimbre (1.0f, 1.0f, (int) neuro::DrumClass::kick) == 0 || kt.getSlices().nearestTimbre (1.0f, 1.0f, (int) neuro::DrumClass::kick) == 3);
+        kt.editSlices ([] (auto& s) { s.setDrumClass (1, (int) neuro::DrumClass::perc); });     // manual override wins
+        CHECK (kt.getSlices().getSlices()[1].effectiveClass() == (int) neuro::DrumClass::perc);
+
+        // Multi-out: enable every class bus; kick -> Kick bus, snare -> main (its bus disabled in the second layout).
+        auto layout = kt.getBusesLayout();
+        for (auto& bus : layout.outputBuses) bus = juce::AudioChannelSet::stereo();
+        CHECK (kt.setBusesLayout (layout) && kt.getTotalNumOutputChannels() == 2 * (1 + neuro::numDrumClasses));
+        kt.prepareToPlay (rate, block);
+        setParam (kt, ParamIDs::attack, 0.0f);
+        auto renderBuses = [&] (int note, int blocks)
+        {
+            juce::AudioBuffer<float> buf (kt.getTotalNumOutputChannels(), block), sum (kt.getTotalNumOutputChannels(), block * blocks);
+            for (int b = 0; b < blocks; ++b)
+            {
+                juce::MidiBuffer midi;
+                if (b == 0) { midi.addEvent (juce::MidiMessage::allNotesOff (1), 0); midi.addEvent (juce::MidiMessage::noteOn (1, note, 1.0f), 0); }
+                kt.processBlock (buf, midi);
+                for (int c = 0; c < buf.getNumChannels(); ++c) sum.copyFrom (c, b * block, buf, c, 0, block);
+            }
+            std::vector<float> peaks;
+            for (int bus = 0; bus <= neuro::numDrumClasses; ++bus) peaks.push_back (sum.getMagnitude (bus * 2, 0, sum.getNumSamples()));
+            return peaks;
+        };
+        auto peaks = renderBuses (36, 20); // pad 1 = slice 1 = kick
+        std::printf ("  kick note: main %.3f, kick bus %.3f\n", peaks[0], peaks[1 + (int) neuro::DrumClass::kick]);
+        CHECK (peaks[0] == 0.0f && peaks[1 + (int) neuro::DrumClass::kick] > 0.1f);
+        peaks = renderBuses (38, 20);      // closed hat
+        CHECK (peaks[0] == 0.0f && peaks[1 + (int) neuro::DrumClass::closedHat] > 0.01f && peaks[1 + (int) neuro::DrumClass::kick] == 0.0f);
+        setParam (kt, ParamIDs::classLevel[(int) neuro::DrumClass::closedHat], -60.0f);
+        CHECK (renderBuses (38, 20)[1 + (int) neuro::DrumClass::closedHat] == 0.0f); // class level fully down = mute
+        setParam (kt, ParamIDs::classLevel[(int) neuro::DrumClass::closedHat], 0.0f);
+
+        layout.outputBuses.getReference (1 + (int) neuro::DrumClass::kick) = juce::AudioChannelSet::disabled();
+        CHECK (kt.setBusesLayout (layout));
+        kt.prepareToPlay (rate, block);
+        juce::AudioBuffer<float> buf (kt.getTotalNumOutputChannels(), block);
+        juce::MidiBuffer midi;
+        midi.addEvent (juce::MidiMessage::noteOn (1, 36, 1.0f), 0);
+        kt.processBlock (buf, midi);
+        CHECK (buf.getMagnitude (0, 0, block) > 0.05f); // kick bus disabled -> kick plays on main
+        kitFile.deleteFile();
+    }
+
+    // ---- Loop Deconstructor + Timbre-Addressed Sequencing (re-orchestration on a new kit) ----
+    {
+        const auto dir = juce::File::getSpecialLocation (juce::File::tempDirectory);
+        auto loop = writeKitWav (dir.getChildFile ("neuro_loop.wav"));                    // kick snare hat kick (1 s = 2 beats)
+        auto otherKit = writeKitWav (dir.getChildFile ("neuro_kit2.wav"), { 2, 1, 0, 2 }); // hat snare kick hat
+        NeuroMPCProcessor dc;
+        auto layout = dc.getBusesLayout();
+        for (auto& bus : layout.outputBuses) bus = juce::AudioChannelSet::stereo();
+        CHECK (dc.setBusesLayout (layout));
+        dc.prepareToPlay (rate, block);
+        CHECK (dc.loadSample (loop, error));
+        setParam (dc, ParamIDs::attack, 0.0f);
+
+        const auto summary = dc.deconstructLoop (0, 120.0);
+        std::printf ("  deconstructed: %d hits, %d steps (kick %d, snare %d, closed hat %d)\n", summary.hits, summary.steps,
+                     summary.perClass[(int) neuro::DrumClass::kick], summary.perClass[(int) neuro::DrumClass::snare],
+                     summary.perClass[(int) neuro::DrumClass::closedHat]);
+        CHECK (summary.hits == 4 && summary.steps == 8);
+        const auto& pat = dc.getSeqPattern (0);
+        const auto& kick = pat.lanes[(size_t) neuro::DrumClass::kick];
+        CHECK (kick.steps[0].on && kick.steps[6].on && kick.steps[0].sliceId > 0 && kick.name == "Kick" && kick.length == 8);
+        CHECK (pat.lanes[(size_t) neuro::DrumClass::snare].steps[2].on && pat.lanes[(size_t) neuro::DrumClass::closedHat].steps[4].on);
+
+        // Play the pattern: each kit piece lands on its own output bus, at its step.
+        auto busEnergy = [&] (int cls, int fromStep, int toStep, const juce::AudioBuffer<float>& audio)
+        { return audio.getMagnitude (2 * (1 + cls), fromStep * 6000, (toStep - fromStep) * 6000); };
+        auto playBar = [&]
+        {
+            juce::AudioBuffer<float> sum (dc.getTotalNumOutputChannels(), 48000), buf (dc.getTotalNumOutputChannels(), block);
+            setParam (dc, ParamIDs::seqMode, 0.0f);
+            dc.processBlock (buf, *std::make_unique<juce::MidiBuffer>());
+            setParam (dc, ParamIDs::seqMode, 2.0f);
+            for (int b = 0; b * block < 48000; ++b)
+            {
+                juce::MidiBuffer midi;
+                dc.processBlock (buf, midi);
+                for (int c = 0; c < buf.getNumChannels(); ++c)
+                    sum.copyFrom (c, b * block, buf, c, 0, juce::jmin (block, 48000 - b * block));
+            }
+            return sum;
+        };
+        auto bar = playBar();
+        CHECK (busEnergy ((int) neuro::DrumClass::kick, 0, 1, bar) > 0.1f && busEnergy ((int) neuro::DrumClass::kick, 3, 5, bar) == 0.0f);
+        // Timing is faithful to the source: the 2nd kick's slice starts at the detected onset (35840, frame-quantised) with a
+        // little lead-in, its step is microtimed by the same amount, so the hit sounds exactly where it was in the loop (36000).
+        CHECK (dc.getSeqPattern (0).lanes[(size_t) neuro::DrumClass::kick].steps[6].micro < 0.0f);
+        CHECK (bar.getMagnitude (2, 35800, 190) < 0.01f && bar.getMagnitude (2, 36000, 200) > 0.1f);
+        CHECK (busEnergy ((int) neuro::DrumClass::snare, 2, 3, bar) > 0.05f && busEnergy ((int) neuro::DrumClass::snare, 0, 2, bar) == 0.0f);
+        CHECK (busEnergy ((int) neuro::DrumClass::closedHat, 4, 5, bar) > 0.01f);
+        CHECK (bar.getMagnitude (0, 0, 48000) == 0.0f); // everything went to class buses
+
+        // Retarget to timbre, then swap in a different kit: the pattern re-orchestrates by sound, not by slice.
+        CHECK (dc.retargetPatternToTimbre (0) == 4 && dc.getSeqPattern (0).lanes[0].steps[0].timbreX >= 0.0f);
+        CHECK (dc.loadSample (otherKit, error));
+        dc.editSlices ([] (auto& s) { s.grid (4); });
+        CHECK (dc.waitForBackgroundWork (20000));
+        bar = playBar();
+        std::printf ("  re-orchestrated on new kit: kick step 1 %.3f, snare step 3 %.3f, hat step 5 %.3f\n",
+                     busEnergy ((int) neuro::DrumClass::kick, 0, 1, bar), busEnergy ((int) neuro::DrumClass::snare, 2, 3, bar),
+                     busEnergy ((int) neuro::DrumClass::closedHat, 4, 5, bar));
+        CHECK (busEnergy ((int) neuro::DrumClass::kick, 0, 1, bar) > 0.1f && busEnergy ((int) neuro::DrumClass::kick, 6, 7, bar) > 0.1f);
+        CHECK (busEnergy ((int) neuro::DrumClass::snare, 2, 3, bar) > 0.05f && busEnergy ((int) neuro::DrumClass::closedHat, 4, 5, bar) > 0.01f);
+
+        // Timbre gene: Mutation moves timbre-addressed steps through sound space; Undo restores.
+        neuro::pattern::MutationSettings m;
+        m.intensity = 1.0f; m.preservation = 0.0f; m.genes = neuro::pattern::timbre;
+        const int snare = (int) neuro::DrumClass::snare; // a mid-map sound (the kick sits in the (0, 0) corner, where jitter clamps)
+        const auto beforeX = dc.getSeqPattern (0).lanes[(size_t) snare].steps[2].timbreX, beforeY = dc.getSeqPattern (0).lanes[(size_t) snare].steps[2].timbreY;
+        dc.editSeqPattern (0, [&] (auto& pt) { neuro::pattern::mutate (pt.lanes[(size_t) snare], m); }, NeuroMPCProcessor::Undo::always);
+        const auto& moved = dc.getSeqPattern (0).lanes[(size_t) snare].steps[2];
+        CHECK (moved.on && (std::abs (moved.timbreX - beforeX) > 1.0e-4f || std::abs (moved.timbreY - beforeY) > 1.0e-4f));
+        CHECK (dc.undoSeqPattern (0) && std::abs (dc.getSeqPattern (0).lanes[(size_t) snare].steps[2].timbreX - beforeX) < 1.0e-6f);
+        loop.deleteFile();
+        otherKit.deleteFile();
+    }
+
+    // ---- Chord-Lock: tonal slices retune to the held chord; drums never; chord notes are consumed and latched ----
+    {
+        auto toneFile = writeToneWav (juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("neuro_chord.wav"), 220.0, 2.0);
+        NeuroMPCProcessor cl;
+        cl.prepareToPlay (rate, block);
+        CHECK (cl.loadSample (toneFile, error));
+        setParam (cl, ParamIDs::attack, 0.0f);
+        CHECK (cl.waitForBackgroundWork (20000));
+        CHECK (cl.getSlices().getSlices()[0].effectiveClass() == (int) neuro::DrumClass::tonal);
+
+        auto playPad = [&] (std::vector<std::tuple<int, int, float>> extra = {})
+        {
+            extra.emplace_back (1, 36, 1.0f);
+            return capture (cl, 230, extra); // long enough for the resampled (longer) note
+        };
+        setParam (cl, ParamIDs::chordLock, 1.0f); // resample
+        auto x = capture (cl, 4, { { 0, 60, 1.0f }, { 0, 64, 1.0f }, { 0, 67, 1.0f }, { 2, 60, 0.0f }, { 2, 64, 0.0f }, { 2, 67, 0.0f } });
+        CHECK (std::all_of (x.begin(), x.end(), [] (float v) { return v == 0.0f; }) && cl.getHeldChord() == ((1 << 0) | (1 << 4) | (1 << 7)));
+        x = playPad();                                 // chord C-E-G latched after release; A3 -> nearest chord tone G3
+        std::printf ("  Chord-Lock resample: A3 -> midi %.2f, %d samples\n", midiOf (x, 4800, 9600), audibleLength (x));
+        CHECK (std::abs (midiOf (x, 4800, 9600) - 55.0) < 0.05 && std::abs (audibleLength (x) - 96000 * std::exp2 (2.0 / 12.0)) < 200);
+
+        setParam (cl, ParamIDs::chordLock, 2.0f);      // keep length: variants render in the background
+        cl.processBackgroundResults();
+        CHECK (cl.waitForBackgroundWork (60000));
+        x = playPad();
+        std::printf ("  Chord-Lock keep length: A3 -> midi %.2f, %d samples (original 96000)\n", midiOf (x, 4800, 9600), audibleLength (x));
+        CHECK (std::abs (midiOf (x, 4800, 9600) - 55.0) < 0.05 && std::abs (audibleLength (x) - 96000) < 960);
+
+        x = playPad ({ { 0, 62, 1.0f }, { 0, 65, 1.0f }, { 0, 69, 1.0f } }); // new chord D-F-A: A3 is a chord tone, unchanged
+        CHECK (std::abs (midiOf (x, 4800 + block, 9600) - 57.0) < 0.05);
+
+        cl.editSlices ([] (auto& s) { s.setDrumClass (0, (int) neuro::DrumClass::kick); }); // drums are never retuned
+        x = playPad ({ { 0, 60, 1.0f }, { 0, 64, 1.0f }, { 0, 67, 1.0f } });
+        CHECK (std::abs (midiOf (x, 4800 + block, 9600) - 57.0) < 0.05);
+        setParam (cl, ParamIDs::chordLock, 0.0f);
+        toneFile.deleteFile();
     }
 
     // Missing file on restore is reported, not substituted.

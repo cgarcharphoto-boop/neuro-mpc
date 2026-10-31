@@ -62,6 +62,12 @@ namespace ParamIDs
     inline constexpr auto padBank      = "padBank";
     inline constexpr auto padBankFollow = "padBankFollow";
     inline constexpr auto padChannel   = "padChannel";
+    inline constexpr auto chordLock    = "chordLock";
+    inline constexpr auto chordInput   = "chordInput";
+    inline constexpr auto chordSplit   = "chordSplit";
+    // Per drum-class level, in DrumClass order.
+    inline constexpr const char* classLevel[] { "levelKick", "levelSnare", "levelClosedHat", "levelOpenHat", "levelTom1", "levelTom2",
+                                                "levelFloorTom", "levelCrash", "levelRide", "levelPerc", "levelTonal" };
 }
 
 class NeuroMPCProcessor : public juce::AudioProcessor,
@@ -138,6 +144,14 @@ public:
     bool undoSeqPattern (int index);
     bool redoSeqPattern (int index);
     bool canUndoSeqPattern (int index) const { return ! seqUndo[(size_t) juce::jlimit (0, numSeqPatterns - 1, index)].empty(); }
+    // Loop Deconstructor: slices the loaded loop at its hits, classifies each hit (kick, snare, hats, toms, cymbals...),
+    // and writes a pattern with one lane per kit piece (exact slice, velocity and microtiming per hit).
+    struct DeconstructSummary { int hits = 0, steps = 0; std::array<int, neuro::numDrumClasses> perClass {}; };
+    DeconstructSummary deconstructLoop (int patternIndex, double bpm, float sensitivity = 0.7f); // 0.7: catches hits on decaying tails
+    // Converts exact-slice steps into timbre-map points, so the pattern re-orchestrates itself on any kit.
+    int retargetPatternToTimbre (int patternIndex);
+    double getLastHostBpm() const noexcept { return lastHostBpm.load(); }
+    uint16_t getHeldChord() const noexcept { return chordMaskAtomic.load(); } // Chord-Lock pitch classes (bit 0 = C)
     bool canRedoSeqPattern (int index) const { return ! seqRedo[(size_t) juce::jlimit (0, numSeqPatterns - 1, index)].empty(); }
     int getSelectedSeqPattern() const noexcept                  { return (int) seqPatternParam->load() - 1; }
     int64_t getSeqPlayStep() const noexcept                     { return seqPlayStep.load(); } // -1 when stopped
@@ -205,7 +219,7 @@ private:
     void refreshStretch();
     void refreshAnalysis();
     void updateKeyboardMap();
-    void renderWithModulation (juce::AudioBuffer<float>&, int from, int to);
+    void renderWithModulation (const neuro::OutputBuses&, int from, int to);
     void updateArpSettings (double bpm);
     void publishMidiRouting();
     bool handleMappedMidi (const juce::MidiMessage&); // audio thread; true = consumed
@@ -268,6 +282,13 @@ private:
     double seqFreeOrigin = 0.0;
     bool seqWasRunning = false;
     std::atomic<int64_t> seqPlayStep { -1 };
+    std::atomic<double> lastHostBpm { 120.0 };
+    std::atomic<uint16_t> chordMaskAtomic { 0 };
+    uint16_t chordMask = 0;   // audio thread: latched chord
+    int lastChordMode = 0;    // message thread: re-plans variant renders when the mode changes
+    int chordKeysDown = 0;
+    std::vector<neuro::StretchKey> chordRequested;
+    std::atomic<float> *chordLockParam = nullptr, *chordInputParam = nullptr, *chordSplitParam = nullptr;
     std::atomic<float> *seqModeParam = nullptr, *seqPatternParam = nullptr, *seqRateParam = nullptr, *seqSwingParam = nullptr,
                        *seqFillParam = nullptr, *weaveAccentParam = nullptr, *weaveAccentAmountParam = nullptr,
                        *weaveFillParam = nullptr, *weaveFillEveryParam = nullptr, *weavePitchParam = nullptr;
@@ -300,6 +321,7 @@ private:
     std::vector<int> padLayoutCaptured;
     void publishHardwarePads();
     std::atomic<float> *padBankParam = nullptr, *padBankFollowParam = nullptr, *padChannelParam = nullptr;
+    std::array<std::atomic<float>*, neuro::numDrumClasses> classLevelParams {};
     neuro::ArpProgram arpProgram;
     neuro::RtShared<neuro::ArpProgram> rtArpProgram;
     std::array<Event, 1024> events {};

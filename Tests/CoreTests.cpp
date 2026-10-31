@@ -7,6 +7,7 @@
 #include "Core/RtShared.h"
 #include "Core/Scales.h"
 #include "Core/Sequencer.h"
+#include "Core/Timbre.h"
 #include "Core/SliceSet.h"
 #include "Core/TransientDetector.h"
 
@@ -675,14 +676,14 @@ namespace
             auto beat = blockStart * bps;
             if (beatJump > 0.0) beat = std::fmod (beat, beatJump);
             seq.process (pattern, timing, 0, n, beat, bps,
-                         [&] (int o, int note, float v, float p) { ev.push_back ({ blockStart + o, note, v, p }); });
+                         [&] (int o, int note, float v, float p, const SeqTarget&) { ev.push_back ({ blockStart + o, note, v, p }); });
             seq.endBlock (n);
         }
 
         blockStart = total;
 
         if (flushAtEnd)
-            seq.flush (0, [&] (int o, int n, float v, float p) { ev.push_back ({ blockStart + o, n, v, p }); });
+            seq.flush (0, [&] (int o, int n, float v, float p, const SeqTarget&) { ev.push_back ({ blockStart + o, n, v, p }); });
 
         std::stable_sort (ev.begin(), ev.end(), [] (auto& a, auto& b)
                           { return a.sample != b.sample ? a.sample < b.sample : (a.velocity == 0.0f) > (b.velocity == 0.0f); });
@@ -799,7 +800,7 @@ static void advancedSequencingTests()
         for (int64_t b = 0; b < (int64_t) steps * 6000; b += 500)
         {
             seq.process (bank.data(), (int) bank.size(), 0, weave, timing, 0, 500, b * bps, bps,
-                         [&] (int o, int n, float v, float p) { if (v > 0.0f) on.emplace_back ((int) ((b + o) / 6000), n, v, p); });
+                         [&] (int o, int n, float v, float p, const SeqTarget&) { if (v > 0.0f) on.emplace_back ((int) ((b + o) / 6000), n, v, p); });
             seq.endBlock (500);
         }
 
@@ -1005,6 +1006,81 @@ static void midiMapTests()
     CHECK (map.getBindings().size() == 1 && MidiMap::describe (map.getBindings()[0]) == "Note C1 (36), ch 10");
 }
 
+namespace
+{
+    // Synthetic drum kit (48 kHz). Filters are one-pole; noise is seeded.
+    std::vector<float> synthDrum (DrumClass which, uint32_t seed = 9)
+    {
+        std::mt19937 rng (seed);
+        std::uniform_real_distribution<float> u (-1.0f, 1.0f);
+        const auto seconds = which == DrumClass::crash || which == DrumClass::ride ? 2.0 : which == DrumClass::tonal ? 1.0 : 0.8;
+        std::vector<float> x ((size_t) (seconds * sr));
+        float lp = 0.0f, lp2 = 0.0f, hp = 0.0f, prev = 0.0f, phase = 0.0f;
+        auto onePole = [] (float& state, float in, float hz) { state += (1.0f - std::exp (-6.2831853f * hz / 48000.0f)) * (in - state); return state; };
+
+        for (size_t i = 0; i < x.size(); ++i)
+        {
+            const auto t = (float) i / (float) sr;
+            const auto n = u (rng);
+            float v = 0.0f;
+
+            switch (which)
+            {
+                case DrumClass::kick:  phase += 6.2831853f * (50.0f + 70.0f * std::exp (-t / 0.03f)) / (float) sr;
+                                       v = std::sin (phase) * std::exp (-t / 0.12f); break;
+                case DrumClass::snare: { const auto band = onePole (lp, n, 6000.0f) - onePole (lp2, n, 800.0f);
+                                         v = 0.4f * std::sin (6.2831853f * 190.0f * t) * std::exp (-t / 0.06f) + 1.2f * band * std::exp (-t / 0.12f); break; }
+                case DrumClass::closedHat:
+                case DrumClass::openHat:
+                case DrumClass::crash: { hp = 0.98f * (hp + n - prev); prev = n;   // high-pass ~150 Hz, then keep the top
+                                         const auto top = hp - onePole (lp, hp, which == DrumClass::crash ? 4000.0f : 7000.0f);
+                                         v = top * std::exp (-t / (which == DrumClass::closedHat ? 0.025f : which == DrumClass::openHat ? 0.18f : 0.9f)); break; }
+                case DrumClass::ride:  { for (float hz : { 3100.0f, 4700.0f, 6300.0f, 8200.0f }) v += 0.25f * std::sin (6.2831853f * hz * t);
+                                         v *= std::exp (-t / 0.7f); break; }
+                case DrumClass::tom1:  v = std::sin (6.2831853f * 190.0f * t) * std::exp (-t / 0.25f); break;
+                case DrumClass::tom2:  v = std::sin (6.2831853f * 130.0f * t) * std::exp (-t / 0.25f); break;
+                case DrumClass::floorTom: v = std::sin (6.2831853f * 90.0f * t) * std::exp (-t / 0.25f); break;
+                case DrumClass::tonal: for (int h = 1; h <= 5; ++h) v += 0.2f / (float) h * std::sin (6.2831853f * 440.0f * (float) h * t); break;
+                case DrumClass::perc:  v = std::sin (6.2831853f * 1500.0f * t) * std::exp (-t / 0.006f); break;
+                default: break;
+            }
+
+            x[i] = 0.8f * v;
+        }
+
+        return x;
+    }
+}
+
+static void timbreTests()
+{
+    int correct = 0;
+
+    for (int c = 0; c < numDrumClasses; ++c)
+    {
+        const auto which = (DrumClass) c;
+        const auto x = synthDrum (which);
+        const float* ch[] = { x.data() };
+        const auto f = analyseTimbre (ch, 1, (int64_t) x.size(), sr);
+        const auto pitched = detectPitch (ch, 1, (int64_t) x.size(), sr).status == PitchEstimate::Status::pitched;
+        const auto got = classify (f, pitched);
+        correct += got == which ? 1 : 0;
+        std::printf ("  %-10s -> %-10s  centroid %6.0f flat %.3f low %.2f mid %.2f high %.2f lowPeak %5.1f decay %5.0f ms  map (%.2f, %.2f)\n",
+                     drumClassName (which), drumClassName (got), f.centroidHz, f.flatness, f.low, f.mid, f.high, f.lowPeakHz, f.decayMs, f.mapX(), f.mapY());
+        CHECK (got == which);
+    }
+
+    std::printf ("  synthetic kit: %d / %d classified correctly\n", correct, numDrumClasses);
+
+    // Map axes: hats are brighter and noisier than kicks; the tonal note is less noisy than the snare.
+    auto at = [] (DrumClass c) { const auto x = synthDrum (c); const float* ch[] = { x.data() }; return analyseTimbre (ch, 1, (int64_t) x.size(), sr); };
+    CHECK (at (DrumClass::closedHat).mapX() > at (DrumClass::kick).mapX() + 0.3f);
+    CHECK (at (DrumClass::snare).mapY() > at (DrumClass::tonal).mapY());
+    std::vector<float> silence ((size_t) sr, 0.0f);
+    const float* sil[] = { silence.data() };
+    CHECK (analyseTimbre (sil, 1, (int64_t) silence.size(), sr).silent);
+}
+
 static void keyTests()
 {
     auto print = [] (const char* name, const KeyEstimate& k)
@@ -1056,6 +1132,7 @@ int main()
     sequencerTests();
     advancedSequencingTests();
     midiMapTests();
+    timbreTests();
     keyTests();
     std::printf (failures == 0 ? "All core tests passed\n" : "%d failure(s)\n", failures);
     return failures == 0 ? EXIT_SUCCESS : EXIT_FAILURE;

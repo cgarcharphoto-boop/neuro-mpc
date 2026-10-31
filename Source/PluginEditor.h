@@ -3,6 +3,7 @@
 #include "PluginProcessor.h"
 #include "UI/GesturePad.h"
 #include "UI/SeqGrid.h"
+#include "UI/TimbreMap.h"
 #include "UI/WaveformView.h"
 
 class NeuroMPCEditor : public juce::AudioProcessorEditor,
@@ -65,12 +66,14 @@ private:
     void setSelectedPitch (float semitones);
     float selectedRoot() const; // reference for the 12-note selector
     void selectPad (int padIndex);
-    enum class Panel { slice, pad, arp, gen, seq, evolve };
+    enum class Panel { slice, pad, arp, gen, seq, evolve, kit };
     void showPanel (Panel);
     void updateArpPanel();
     void updateGenPanel();
     void updateSeqPanel();
     void updateEvolvePanel();
+    void updateKitPanel();
+    std::vector<juce::Component*> kitPanelComponents();
     void forEachScopedLane (const std::function<void (neuro::SeqLane&, int)>&, NeuroMPCProcessor::Undo);
     std::vector<juce::Component*> evolvePanelComponents();
     void editSelectedSeqStep (const std::function<void (neuro::SeqStep&)>&);
@@ -122,7 +125,7 @@ private:
     std::vector<std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment>> comboAttachments;
     std::vector<std::unique_ptr<Pad>> pads;
     std::array<juce::TextButton, neuro::numBanks> bankButtons;
-    juce::TextButton sliceTab { "SLICE" }, padTab { "PAD" }, arpTab { "ARP" }, genTab { "GEN" }, seqTab { "SEQ" }, evolveTab { "EVOLVE" };
+    juce::TextButton sliceTab { "SLICE" }, padTab { "PAD" }, arpTab { "ARP" }, genTab { "GEN" }, seqTab { "SEQ" }, evolveTab { "EVOLVE" }, kitTab { "KIT" };
     int currentBank = 0, selectedPad = 0, copiedPad = -1, learnBaseline = -1, shownSliceCount = -1;
     Panel activePanel = Panel::slice;
 
@@ -197,6 +200,16 @@ private:
                  weaveEvery { juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight };
     std::optional<neuro::SeqPattern> compareSnapshot; // A/B: the pattern before the last mutation
     int compareIndex = -1;
+    // Kit panel: timbre map, classes, Loop Deconstructor, timbre targets, per-class levels, Chord-Lock
+    TimbreMap timbreMap { proc };
+    juce::Label kitTitle, kitInfo, chordInfo;
+    juce::ComboBox sliceClass, laneClass, chordMode, chordInput;
+    juce::Slider hitSensitivity { juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight },
+                 chordSplit { juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight };
+    std::array<juce::Slider, neuro::numDrumClasses> classLevels;
+    juce::TextButton deconstructButton { "Deconstruct loop" }, retargetButton { "Retarget to timbre" },
+                     stepToSlice { "Step -> slice" }, stepToTimbre { "Step -> timbre" }, stepToPad { "Step -> pad" };
+
     LearnOverlay learnOverlay { *this };   // declared last: on top of everything
     std::array<juce::TextButton, 4> stepPageButtons;
 

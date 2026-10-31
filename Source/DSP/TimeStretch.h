@@ -39,9 +39,11 @@ struct StretchBank
 {
     std::vector<StretchEntry> entries;
 
-    const StretchEntry* find (const SliceDefinition& s) const noexcept
+    // extraPitch: a Chord-Lock variant rendered `extraPitch` semitones above the slice's own rendered pitch.
+    const StretchEntry* find (const SliceDefinition& s, int extraPitch = 0) const noexcept
     {
-        const auto key = StretchKey::of (s);
+        auto key = StretchKey::of (s);
+        key.pitch += (float) extraPitch;
 
         for (const auto& e : entries)
             if (e.key == key)

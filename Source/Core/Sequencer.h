@@ -24,6 +24,18 @@ struct SeqStep
     float pitch = 0.0f;        // semitones added to the triggered pad / key (resampled)
     SeqCondition condition = SeqCondition::always;
     int condA = 1, condB = 2;  // ratio: plays on lane cycle A of every B (1-based), e.g. 1:2 = every other cycle
+    // Sound target (Timbre-Addressed Sequencing): an exact slice, or a timbre-map point resolved to the nearest slice
+    // of the current kit (within the lane's drum class if set). Neither = the lane's note/pad.
+    int sliceId = 0;
+    float timbreX = -1.0f, timbreY = -1.0f;
+};
+
+// What a sequencer hit should play.
+struct SeqTarget
+{
+    int sliceId = 0;
+    float x = -1.0f, y = -1.0f;
+    int drumClass = -1;
 };
 
 inline std::string describe (const SeqStep& st)
@@ -48,6 +60,7 @@ struct SeqLane
     static constexpr int maxSteps = 64;
 
     int note = 36;             // MIDI note the lane plays (pads mode: the pad on that note)
+    int drumClass = -1;        // kit piece this lane represents (timbre targets stay within it); -1 = any
     int length = 16;           // steps; lanes may differ (polymeter)
     bool mute = false;
     std::string name;
@@ -100,7 +113,7 @@ struct SeqWeave
 // Step sequencer. Timing is stateless: every hit's time (grid + swing + microtiming + ratchet) and its probability
 // outcome are pure functions of the beat position, lane, step and seed, so playback is deterministic, block-size
 // independent and robust to host loops and seeks. Only sounding notes are state (sample-scheduled note-offs).
-// sink (sampleOffset, note, velocity, pitchSemitones); velocity 0 = note-off. Events within one call may be unordered.
+// sink (sampleOffset, note, velocity, pitchSemitones, const SeqTarget&); velocity 0 = note-off. Events within one call may be unordered.
 class Sequencer
 {
 public:
@@ -133,11 +146,11 @@ public:
         const auto beatAtTo = beatAtFrom + (to - from) * beatsPerSample;
         const auto first = (int64_t) std::floor (beatAtFrom / s) - 2;
         const auto last = (int64_t) std::floor (beatAtTo / s) + 2;
-        auto off = [&] (int o, int n) { sink (o, n, 0.0f, 0.0f); };
+        auto off = [&] (int o, int n) { sink (o, n, 0.0f, 0.0f, SeqTarget {}); };
 
         // Gather this call's hits, then emit them in time order: microtiming can move a step before the previous
         // step's late ratchet, and retriggers/note-offs must be applied in real time order.
-        struct Hit { int offset; int note; float velocity, pitch; int64_t gateSamples; };
+        struct Hit { int offset; int note; float velocity, pitch; int64_t gateSamples; SeqTarget target; };
         std::array<Hit, maxHitsPerCall> hits;
         int numHits = 0;
 
@@ -180,7 +193,8 @@ public:
 
                     const auto offset = std::clamp (from + (int) std::llround ((hit - beatAtFrom) / beatsPerSample), from, to - 1);
                     const auto gateSamples = (int64_t) std::llround (std::clamp (step.gate, 0.05f, 1.0f) * s / ratchet / beatsPerSample);
-                    hits[(size_t) numHits++] = { offset, lane.note, velocity, pitch, gateSamples };
+                    hits[(size_t) numHits++] = { offset, lane.note, velocity, pitch, gateSamples,
+                                                 { step.sliceId, step.timbreX, step.timbreY, lane.drumClass } };
                 }
             }
         }
@@ -201,7 +215,7 @@ public:
             const auto& h = hits[(size_t) i];
             sounding.releaseUntil (h.offset, true, off);
             sounding.start (h.note, h.offset, h.gateSamples, off);
-            sink (h.offset, h.note, h.velocity, h.pitch);
+            sink (h.offset, h.note, h.velocity, h.pitch, h.target);
         }
 
         sounding.releaseUntil (to, false, off);
@@ -212,7 +226,7 @@ public:
     template <typename Sink>
     void flush (int offset, Sink&& sink) noexcept
     {
-        sounding.flush (offset, [&] (int o, int n) { sink (o, n, 0.0f, 0.0f); });
+        sounding.flush (offset, [&] (int o, int n) { sink (o, n, 0.0f, 0.0f, SeqTarget {}); });
     }
 
     int soundingCount() const noexcept { return sounding.count(); }
