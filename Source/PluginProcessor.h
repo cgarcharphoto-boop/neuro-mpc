@@ -72,6 +72,7 @@ namespace ParamIDs
     inline constexpr auto clockIn      = "midiClockIn";
     inline constexpr auto clockOut     = "midiClockOut";
     inline constexpr auto linkPort     = "midiLinkPort";
+    inline constexpr auto drumOutputs  = "drumOutputs";
     // Per drum-class level, in DrumClass order.
     inline constexpr const char* classLevel[] { "levelKick", "levelSnare", "levelClosedHat", "levelOpenHat", "levelTom1", "levelTom2",
                                                 "levelFloorTom", "levelCrash", "levelRide", "levelPerc", "levelTonal" };
@@ -162,6 +163,11 @@ public:
     DeconstructSummary separateDrums (int patternIndex, double bpm = 0.0);
     // Teach the kit: example hits (kick / snare / hats-cymbals = nmf::Component) of the loaded loop become Separate drums'
     // templates. Examples belong to the loaded file; teaching on another file starts over. Returns that drum's count.
+    // Kit -> pads: the best hit of each recognised drum on bank A in MPC order (A1 Kick, A2 Snare, A3 Closed Hat...),
+    // the other hits on banks B-D, named and coloured. Done after Deconstruct / Separate drums; returns pads assigned.
+    int assignKitToPads();
+    // Folder of the last stems written (Separate drums / Extract drums), else the Separated folder; shown in Finder.
+    juce::File getStemsFolder() const { return lastStemsFolder.isDirectory() ? lastStemsFolder : juce::File::getSpecialLocation (juce::File::userMusicDirectory).getChildFile ("NEURO MPC/Separated"); }
     int teachDrum (int component, int sliceIndex);
     int teachDrumRange (int component, int64_t start, int64_t end);
     void clearTaughtDrums();
@@ -324,7 +330,7 @@ private:
     int chordKeysDown = 0;
     std::vector<neuro::StretchKey> chordRequested;
     std::atomic<float> *chordLockParam = nullptr, *chordInputParam = nullptr, *chordSplitParam = nullptr;
-    std::atomic<float> *clockInParam = nullptr, *clockOutParam = nullptr, *linkPortParam = nullptr;
+    std::atomic<float> *clockInParam = nullptr, *clockOutParam = nullptr, *linkPortParam = nullptr, *drumOutputsParam = nullptr;
     neuro::MidiLinkPort linkPortOut;
     bool linkPortFailed = false;
     struct LinkEvent { int offset; uint8_t data[3]; int size; };
@@ -408,7 +414,8 @@ private:
     void setAiState (AiState, const juce::String& message = {});
     bool computeDrums (const neuro::SampleData&, juce::AudioBuffer<float>& out, juce::String& error);
     std::vector<neuro::nmf::Example> taughtDrums; // guarded by modelLock
-    juce::File taughtFile;
+    juce::File taughtFile, lastStemsFolder;
+    bool restoringState = false; // message thread: project/preset restore or relink in progress
     juce::ValueTree pendingSliceTree; // slices of a missing sample, applied on relink
     bool loadedNewerVersion = false;
     juce::File presetDirectory;

@@ -266,6 +266,15 @@ NeuroMPCEditor::NeuroMPCEditor (NeuroMPCProcessor& p) : AudioProcessorEditor (p)
                              juce::dontSendNotification);
         };
     }
+    showStems.setTooltip ("Open the stems folder in Finder: one WAV per drum (Kick, Snare, Cymbals, Residual) to drag into Logic or Live");
+    showStems.onClick = [this] { auto f = proc.getStemsFolder(); f.createDirectory(); f.revealToUser(); };
+    kitToPads.setTooltip ("Put the recognised drums on the pads: A1 Kick, A2 Snare, A3 Closed Hat, A4 Open Hat, A5-A7 Toms, A8 Crash, "
+                          "A9 Ride, A10 Perc, A11 Tonal (best hit of each); the other hits on banks B-D. Done automatically by "
+                          "Deconstruct and Separate drums");
+    kitToPads.onClick = [this] { kitInfo.setText (juce::String (proc.assignKitToPads()) + " pads assigned (bank A = one of each drum)", juce::dontSendNotification); };
+    attachButton (drumOutputs, ParamIDs::drumOutputs);
+    drumOutputs.setTooltip ("Off: everything on the main output. On: each drum on its own output (Kick, Snare, ...). In Logic, load "
+                            "NEURO MPC as Multi-Output and click + on the instrument channel to add the aux channels");
     teachClear.setTooltip ("Forget the taught examples (Separate drums uses its generic drum sounds)");
     teachClear.onClick = [this, taughtText] { proc.clearTaughtDrums(); kitInfo.setText (taughtText(), juce::dontSendNotification); };
 
@@ -1136,7 +1145,7 @@ void NeuroMPCEditor::registerMappables()
              { &mutSeed, "evolve.seed" }, { &kitTab, "view.kit" }, { &sliceClass, "kit.sliceClass" }, { &laneClass, "kit.laneClass" },
              { &hitSensitivity, "kit.hitSensitivity" }, { &deconstructButton, "kit.deconstruct" }, { &separateButton, "kit.separate" }, { &retargetButton, "kit.retarget" },
              { &stepToSlice, "kit.stepToSlice" }, { &stepToTimbre, "kit.stepToTimbre" }, { &stepToPad, "kit.stepToPad" },
-             { &extractAiButton, "kit.extractAi" }, { &teachKick, "kit.teachKick" }, { &teachSnare, "kit.teachSnare" }, { &teachHat, "kit.teachHat" }, { &teachClear, "kit.teachClear" } })
+             { &extractAiButton, "kit.extractAi" }, { &teachKick, "kit.teachKick" }, { &teachSnare, "kit.teachSnare" }, { &teachHat, "kit.teachHat" }, { &teachClear, "kit.teachClear" }, { &showStems, "kit.showStems" }, { &kitToPads, "kit.toPads" } })
         id (*c, name);
 
     for (int pc = 0; pc < 12; ++pc)
@@ -1534,7 +1543,7 @@ std::vector<juce::Component*> NeuroMPCEditor::kitPanelComponents()
 {
     std::vector<juce::Component*> list { &separateButton, &timbreMap, &kitTitle, &kitInfo, &chordInfo, &sliceClass, &laneClass, &chordMode, &chordInput,
                                          &hitSensitivity, &chordSplit, &deconstructButton, &retargetButton, &stepToSlice, &stepToTimbre, &stepToPad,
-                                         &extractAiButton, &teachKick, &teachSnare, &teachHat, &teachClear };
+                                         &extractAiButton, &teachKick, &teachSnare, &teachHat, &teachClear, &showStems, &kitToPads, &drumOutputs };
 
     for (auto& k : classLevels)
         list.push_back (&k);
@@ -2312,6 +2321,12 @@ void NeuroMPCEditor::resized()
         {
             b->setBounds (rTeach.removeFromLeft (110));
             rTeach.removeFromLeft (6);
+        }
+        auto rStems = row();
+        for (auto* b : { (juce::Component*) &kitToPads, (juce::Component*) &showStems, (juce::Component*) &drumOutputs })
+        {
+            b->setBounds (rStems.removeFromLeft (110));
+            rStems.removeFromLeft (6);
         }
         auto r3 = row();
         chordMode.setBounds (r3.removeFromLeft (190));

@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.1.1 (2026-10-31): Fixes from the first real session
+- **Fixed: silent pads in Logic.** With every output bus enabled (Logic's multi-output instrument), analysed slices played only on per-drum aux outputs, so the main channel was silent.
+  - **Now:** everything plays on the main output. **KIT ▸ Drum outputs** turns separate per-drum outputs on.
+  - **Regression test:** all buses enabled, main 0.79, kick bus 0.
+- **Kit → pads:** Deconstruct and Separate drums now put the recognised drums on the pads in MPC order: A1 Kick, A2 Snare, A3 Closed Hat, A4 Open Hat, A5–A7 Toms, A8 Crash, A9 Ride, A10 Perc, A11 Tonal (the loudest hit of each). The other hits go on banks B–D, named and coloured. A **Kit → pads** button re-applies it.
+- **Stems for Logic / Live:** Separate drums also writes one WAV per stem to `~/Music/NEURO MPC/Separated/<loop>/` (`<loop> - Kick.wav`, `Snare`, `Cymbals`, `Residual`), all with the same length and start, so they line up when dragged into a DAW. **KIT ▸ Show stems** opens the folder in Finder.
+- **Pads after re-slicing:** if Auto-Slice, Grid, Clear or a new sample leaves every assigned pad pointing at a removed slice, the pads follow the new slices again instead of going silent. Saved projects are restored as saved.
+
 ## 1.1.0 (2026-10-31): Runs in unison with GW-1 and KAOSS NEXUS
 - **Lane output:** SEQ ▸ **Out: sampler / MIDI ch N / sampler + MIDI ch N** per lane. MIDI lanes send note on/off on the step's exact sample to the plugin's MIDI output (Live: route to GW-1).
 - **Link port:** SEQ ▸ **Link port** opens the virtual MIDI source **NEURO MPC**, which carries MIDI lanes and clock to GW-1, KAOSS NEXUS or any app (Logic, standalone). The audio thread hands messages to a 1 ms sender thread through a lock-free FIFO.

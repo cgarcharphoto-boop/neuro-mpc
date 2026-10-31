@@ -1,5 +1,6 @@
 // Field test (not part of ctest): real drum loops, KIT tab snapshot, and the installed VST3/AU hosted through JUCE.
 // Usage: neuro_field_test <outputDir> <loop.caf/wav>...
+#include "Core/TransientDetector.h"
 #include "PluginEditor.h"
 #include <CoreFoundation/CoreFoundation.h>
 
@@ -180,9 +181,60 @@ namespace
     }
 }
 
+// A user's session, headless: load a drum loop, Auto-Slice, play pads; Deconstruct; Separate drums. Each pad press is
+// rendered with the host's bus layout (main only, or every output enabled as in Logic's multi-output instrument),
+// reporting the level on the main output and on the class outputs.
+static void workflow (const juce::String& loop, bool allBuses)
+{
+    NeuroMPCProcessor p;
+    if (allBuses)
+    {
+        auto layout = p.getBusesLayout();
+        for (auto& bus : layout.outputBuses) bus = juce::AudioChannelSet::stereo();
+        p.setBusesLayout (layout);
+    }
+    p.prepareToPlay (48000.0, 512);
+    juce::String error;
+    p.loadSample (juce::File (loop), error);
+    p.waitForBackgroundWork (30000);
+    auto pressPads = [&] (const char* stage)
+    {
+        p.processBackgroundResults();
+        std::printf ("  [%s] %s: %d slices; pads:", allBuses ? "all outputs on" : "main only", stage, p.getSlices().size());
+        for (int pad = 0; pad < 4; ++pad)
+        {
+            juce::AudioBuffer<float> buf (p.getTotalNumOutputChannels(), 512);
+            juce::MidiBuffer midi;
+            p.auditionNote (p.padNote (pad), 0.9f);
+            float mainPeak = 0.0f, classPeak = 0.0f;
+            for (int b = 0; b < 30; ++b)
+            {
+                p.processBlock (buf, midi);
+                mainPeak = juce::jmax (mainPeak, buf.getMagnitude (0, 0, 512), buf.getMagnitude (1, 0, 512));
+                for (int c = 2; c < buf.getNumChannels(); ++c) classPeak = juce::jmax (classPeak, buf.getMagnitude (c, 0, 512));
+            }
+            p.auditionNote (p.padNote (pad), 0.0f);
+            std::printf ("  %d %s: main %.2f class %.2f", pad + 1, p.getPads()[pad].name.c_str(), mainPeak, classPeak);
+        }
+        std::printf ("\n");
+    };
+    pressPads ("loaded");
+    p.editSlices ([&] (auto& set) { set.setStarts (neuro::detectTransients (p.getSample()->buffer.getArrayOfReadPointers(), p.getSample()->buffer.getNumChannels(), p.getSample()->length(), p.getSample()->sampleRate, 0.5f)); });
+    p.waitForBackgroundWork (30000);
+    pressPads ("Auto-Slice");
+    p.deconstructLoop (0);
+    p.waitForBackgroundWork (30000);
+    pressPads ("Deconstruct");
+    p.loadSample (juce::File (loop), error);
+    p.separateDrums (0);
+    p.waitForBackgroundWork (30000);
+    pressPads ("Separate drums");
+}
+
 int main (int argc, char** argv)
 {
     juce::ScopedJuceInitialiser_GUI init;
+    if (argc == 3 && juce::String (argv[1]) == "workflow") { workflow (argv[2], false); workflow (argv[2], true); return 0; }
     if (argc < 4) { std::printf ("usage: neuro_field_test <outDir> <kitWav> <loop>...\n"); return 1; }
     const juce::File outDir (argv[1]);
     outDir.createDirectory();

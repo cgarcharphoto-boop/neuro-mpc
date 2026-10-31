@@ -80,6 +80,7 @@ NeuroMPCProcessor::NeuroMPCProcessor()
     clockInParam    = apvts.getRawParameterValue (ParamIDs::clockIn);
     clockOutParam   = apvts.getRawParameterValue (ParamIDs::clockOut);
     linkPortParam   = apvts.getRawParameterValue (ParamIDs::linkPort);
+    drumOutputsParam = apvts.getRawParameterValue (ParamIDs::drumOutputs);
     padNoteHeld.fill (-1);
 
     for (int i = 0; i < neuro::padsPerBank; ++i)
@@ -238,7 +239,9 @@ juce::AudioProcessorValueTreeState::ParameterLayout NeuroMPCProcessor::createLay
                 std::make_unique<AudioParameterBool> (ParameterID { ParamIDs::clockIn, 1 }, "Follow MIDI Clock", true),
                 std::make_unique<AudioParameterBool> (ParameterID { ParamIDs::clockOut, 1 }, "Send MIDI Clock", false),
                 // Virtual MIDI source "NEURO MPC": MIDI-out lanes and clock for GW-1, KAOSS NEXUS, other apps.
-                std::make_unique<AudioParameterBool> (ParameterID { ParamIDs::linkPort, 1 }, "MIDI Link Port", false));
+                std::make_unique<AudioParameterBool> (ParameterID { ParamIDs::linkPort, 1 }, "MIDI Link Port", false),
+                // Off: everything plays on the main output. On: each drum class on its own output (Kick, Snare, ...).
+                std::make_unique<AudioParameterBool> (ParameterID { ParamIDs::drumOutputs, 1 }, "Separate Drum Outputs", false));
     return layout;
 }
 
@@ -617,9 +620,13 @@ void NeuroMPCProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     std::array<juce::AudioBuffer<float>, neuro::numDrumClasses> classBuses; // alias host channels; no allocation
     outs.main = &mainBus;
 
+    // Separate drum outputs are opt-in: hosts such as Logic's multi-output instrument enable every bus, which would
+    // otherwise send everything to aux outputs nobody has created yet (silence on the main channel).
+    const auto drumOutputs = drumOutputsParam->load() > 0.5f;
+
     for (int c = 0; c < neuro::numDrumClasses; ++c)
     {
-        if (auto* bus = getBus (false, c + 1); bus != nullptr && bus->isEnabled())
+        if (auto* bus = getBus (false, c + 1); drumOutputs && bus != nullptr && bus->isEnabled())
         {
             classBuses[(size_t) c] = getBusBuffer (buffer, false, c + 1);
             outs.classes[(size_t) c] = &classBuses[(size_t) c];
@@ -1103,6 +1110,21 @@ void NeuroMPCProcessor::publishSlices()
 {
     rtSlices.publish (std::make_shared<const neuro::SliceSet> (slices));
 
+    // Re-sliced from scratch (Auto-Slice, Grid, Clear, new sample): pads assigned to slices that no longer exist would
+    // be silent, so they follow the new slices again (kit names/colours dropped).
+    if (! pads.followSlices && ! restoringState)
+    {
+        bool anyValid = false;
+        for (int i = 0; i < neuro::numPads && ! anyValid; ++i)
+            anyValid = pads[i].sliceId != 0 && slices.indexOfId (pads[i].sliceId) >= 0;
+
+        if (! anyValid)
+        {
+            for (int i = 0; i < neuro::numPads; ++i) { pads[i].name.clear(); pads[i].colour = neuro::PadDefinition {}.colour; }
+            pads.followSlices = true;
+        }
+    }
+
     if (pads.followSlices)
     {
         pads.autoAssign (slices);
@@ -1281,6 +1303,7 @@ NeuroMPCProcessor::DeconstructSummary NeuroMPCProcessor::deconstructLoop (int pa
 
     auto* rate = apvts.getParameter (ParamIDs::seqRate); // the pattern is written in 1/16 steps
     rate->setValueNotifyingHost (rate->convertTo0to1 (3.0f));
+    assignKitToPads();
     return summary;
 }
 
@@ -1497,6 +1520,7 @@ juce::File NeuroMPCProcessor::finishExtractDrums()
     }
 
     const auto file = separatedDirectory().getChildFile (source->file.getFileNameWithoutExtension() + " (drums).wav");
+    lastStemsFolder = separatedDirectory();
     juce::String error;
 
     if (! writeWav24 (file, drums, source->sampleRate) || ! loadSample (file, error))
@@ -1548,6 +1572,66 @@ void NeuroMPCProcessor::updateLinkPort()
         if (linkPortOut.opened())
             linkPortOut.close();
     }
+}
+
+int NeuroMPCProcessor::assignKitToPads()
+{
+    const std::scoped_lock lock (modelLock);
+
+    if (sample == nullptr)
+        return 0;
+
+    // Hits only (bars of a residual bed and long slices are not drum hits), grouped by class, loudest first.
+    const auto& all = slices.getSlices();
+    std::array<std::vector<std::pair<float, int>>, neuro::numDrumClasses> byClass; // (peak, slice index)
+
+    for (size_t i = 0; i < all.size(); ++i)
+    {
+        const auto& sl = all[i];
+        const auto cls = sl.effectiveClass();
+
+        if (cls < 0 || sl.length() > (int64_t) (1.0 * sample->sampleRate))
+            continue;
+
+        const auto n = (int) juce::jmin<int64_t> (sl.length(), (int64_t) (0.05 * sample->sampleRate));
+        float peak = 0.0f;
+        for (int c = 0; c < sample->buffer.getNumChannels(); ++c)
+            peak = juce::jmax (peak, sample->buffer.getMagnitude (c, (int) sl.startSample, n));
+        byClass[(size_t) cls].push_back ({ peak, (int) i });
+    }
+
+    for (auto& v : byClass)
+        std::stable_sort (v.begin(), v.end(), [] (const auto& a, const auto& b) { return a.first > b.first; });
+
+    // Bank A: the best hit of each drum in MPC order (A1 Kick, A2 Snare, A3 Closed Hat, ...). Banks B-D: every other
+    // hit, drum by drum. Unused pads are cleared.
+    int assigned = 0;
+    editPads ([&] (neuro::PadBank& bank)
+    {
+        for (int pad = 0; pad < neuro::numPads; ++pad)
+            bank.clear (pad);
+
+        auto put = [&] (int pad, int cls, int sliceIndex, int number)
+        {
+            bank.assign (pad, all[(size_t) sliceIndex].id);
+            bank[pad].name = juce::String (neuro::drumClassName ((neuro::DrumClass) cls)).toStdString()
+                             + (number > 1 ? " " + std::to_string (number) : "");
+            bank[pad].colour = neuro::drumClassColour (cls);
+            ++assigned;
+        };
+
+        for (int cls = 0; cls < neuro::numDrumClasses; ++cls)
+            if (! byClass[(size_t) cls].empty())
+                put (cls, cls, byClass[(size_t) cls].front().second, 1);
+
+        auto next = neuro::padsPerBank;
+
+        for (int cls = 0; cls < neuro::numDrumClasses; ++cls)
+            for (size_t k = 1; k < byClass[(size_t) cls].size() && next < neuro::numPads; ++k)
+                put (next++, cls, byClass[(size_t) cls][k].second, (int) k + 1);
+    });
+
+    return assigned;
 }
 
 int NeuroMPCProcessor::teachDrumRange (int component, int64_t start, int64_t end)
@@ -1628,6 +1712,23 @@ NeuroMPCProcessor::DeconstructSummary NeuroMPCProcessor::separateDrums (int patt
 
     if (! writeWav24 (file, stems, sr))
         return summary;
+
+    // One file per stem, same length and start, for dragging into a DAW (Logic, Live): "<name>/<name> - Kick.wav", ...
+    {
+        const auto name = original->file.getFileNameWithoutExtension();
+        const auto folder = separatedDirectory().getChildFile (name);
+        static constexpr const char* stemNames[] { "Kick", "Snare", "Cymbals", "Residual" };
+
+        for (int st = 0; st < neuro::nmf::numStems; ++st)
+        {
+            juce::AudioBuffer<float> one (numChannels, (int) length);
+            for (int c = 0; c < numChannels; ++c)
+                one.copyFrom (c, 0, result.stems[(size_t) st][(size_t) c].data(), (int) length);
+            writeWav24 (folder.getChildFile (name + " - " + stemNames[st] + ".wav"), one, sr);
+        }
+
+        lastStemsFolder = folder;
+    }
 
     juce::String error;
 
@@ -1722,6 +1823,7 @@ NeuroMPCProcessor::DeconstructSummary NeuroMPCProcessor::separateDrums (int patt
 
     auto* rate = apvts.getParameter (ParamIDs::seqRate);
     rate->setValueNotifyingHost (rate->convertTo0to1 (3.0f));
+    assignKitToPads();
     return summary;
 }
 
@@ -2227,6 +2329,8 @@ bool NeuroMPCProcessor::applyStateTree (juce::ValueTree root)
     if (! root.hasType ("NEURO_MPC"))
         return false;
 
+    const juce::ScopedValueSetter<bool> restoring (restoringState, true); // saved pad assignments are kept as saved
+
     const std::scoped_lock lock (modelLock);
     loadedNewerVersion = (int) root.getProperty ("version", 1) > stateVersion;
     migrate (root);
@@ -2403,6 +2507,7 @@ bool NeuroMPCProcessor::relinkSample (const juce::File& file, juce::String& erro
 {
     const std::scoped_lock lock (modelLock);
     const auto pending = pendingSliceTree;
+    const juce::ScopedValueSetter<bool> restoring (restoringState, true);
 
     if (! loadSample (file, error))
         return false;

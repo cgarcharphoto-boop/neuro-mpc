@@ -210,7 +210,9 @@ private:
     std::array<juce::Slider, neuro::numDrumClasses> classLevels;
     juce::TextButton separateButton { "Separate drums" }, deconstructButton { "Deconstruct loop" }, retargetButton { "Retarget to timbre" },
                      stepToSlice { "Step -> slice" }, stepToTimbre { "Step -> timbre" }, stepToPad { "Step -> pad" },
-                     extractAiButton { "Extract drums (AI)" }, teachKick { "Teach kick" }, teachSnare { "Teach snare" }, teachHat { "Teach hat/cym" }, teachClear { "Clear taught" };
+                     extractAiButton { "Extract drums (AI)" }, teachKick { "Teach kick" }, teachSnare { "Teach snare" }, teachHat { "Teach hat/cym" }, teachClear { "Clear taught" },
+                     showStems { "Show stems" }, kitToPads { "Kit -> pads" };
+    juce::ToggleButton drumOutputs { "Drum outputs" };
 
     int shownAiState = -1;
     void updateAiStatus();

@@ -88,6 +88,28 @@ The groove check is only a proxy. A real accuracy figure needs a hand-labelled s
 - **Cancel:** clicking again cancels; the button returns immediately.
 - **Quality** (real Apple Drummer loop + bass + chords): drums SDR goes from -14.8 dB (the mix) to **20.3 dB** (the stem).
 
+## Kit on pads, stems and outputs (1.1.1)
+**Drums on pads:**
+- **Deconstruct loop** and **Separate drums** put the drums on the pads in MPC order. Each pad on bank A gets the loudest hit of its drum:
+
+  | Pad | A1 | A2 | A3 | A4 | A5–A7 | A8 | A9 | A10 | A11 |
+  |---|---|---|---|---|---|---|---|---|---|
+  | Drum | Kick | Snare | Closed Hat | Open Hat | Toms | Crash | Ride | Perc | Tonal |
+
+- Every other hit goes on banks B–D, named and coloured. **Kit → pads** re-applies this at any time.
+- MPK mini / MPC pads play them through the normal pad notes (A1 = C1).
+
+**Stems for Logic and Live:**
+- **Separate drums** writes `~/Music/NEURO MPC/Separated/<loop>/<loop> - Kick.wav`, `- Snare.wav`, `- Cymbals.wav` and `- Residual.wav`.
+- All four have the same length and start, so they line up when dragged into a DAW.
+- **Show stems** opens the folder in Finder.
+
+**Separate outputs:**
+- Off by default: everything plays on the main output.
+- **Drum outputs** on: each drum plays on its own output.
+- **Logic:** insert NEURO MPC as **Multi-Output**, then click **+** on its channel strip to add the aux channels.
+- **Live:** use the track's output choosers for the extra outputs.
+
 ## Limitations
 - The classifier is heuristic and tuned on synthetic drums; expect overrides on real kits, e.g. claps/rims vs snares, or toms vs tonal bass hits.
 - Loop length assumes a power-of-two number of beats at the host tempo.

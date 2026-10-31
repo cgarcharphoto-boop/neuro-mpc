@@ -12,13 +12,7 @@ public:
     int selected = -1;
     std::function<void (int)> onSliceClicked;
 
-    static juce::Colour colourOf (int cls)
-    {
-        static const juce::Colour colours[] { juce::Colour (0xffe74c3c), juce::Colour (0xfff39c12), juce::Colour (0xfff1c40f), juce::Colour (0xffd4ac0d),
-                                              juce::Colour (0xff2ecc71), juce::Colour (0xff27ae60), juce::Colour (0xff1e8449), juce::Colour (0xff3498db),
-                                              juce::Colour (0xff5dade2), juce::Colour (0xff9b59b6), juce::Colour (0xffecf0f1) };
-        return cls >= 0 && cls < neuro::numDrumClasses ? colours[cls] : juce::Colours::grey;
-    }
+    static juce::Colour colourOf (int cls) { return juce::Colour (neuro::drumClassColour (cls)); }
 
     void paint (juce::Graphics& g) override
     {

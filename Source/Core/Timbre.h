@@ -14,6 +14,13 @@ enum class DrumClass { kick, snare, closedHat, openHat, tom1, tom2, floorTom, cr
 
 inline constexpr int numDrumClasses = (int) DrumClass::count;
 
+inline uint32_t drumClassColour (int c) noexcept // ARGB, shared by pads and the timbre map
+{
+    static constexpr uint32_t colours[] { 0xffe74c3c, 0xfff39c12, 0xfff1c40f, 0xffd4ac0d, 0xff2ecc71, 0xff27ae60, 0xff1e8449,
+                                          0xff3498db, 0xff5dade2, 0xff9b59b6, 0xffecf0f1 };
+    return c >= 0 && c < numDrumClasses ? colours[c] : 0xff808080;
+}
+
 inline const char* drumClassName (DrumClass c) noexcept
 {
     static constexpr const char* names[] { "Kick", "Snare", "Closed Hat", "Open Hat", "Tom 1", "Tom 2", "Floor Tom",
