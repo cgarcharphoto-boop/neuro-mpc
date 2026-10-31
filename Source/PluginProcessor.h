@@ -174,7 +174,7 @@ public:
     bool startExtractDrums();                   // async; false if busy, no sample or no model
     juce::File finishExtractDrums();            // message thread, after AiState::ready: writes + loads the stem
     juce::File extractDrumsBlocking (juce::String& error); // tests and offline use
-    void cancelAi();
+    void cancelAi (bool wait = false);          // UI: returns at once (state becomes failed "Cancelled"); wait: join
     AiState getAiState() const noexcept { return (AiState) aiState.load(); }
     float getAiProgress() const noexcept { return aiProgress.load(); }
     juce::String getAiMessage() const;

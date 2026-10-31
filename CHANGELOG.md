@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.0.0 (2026-10-31): Public MVP
+- **Extract drums (AI):** Demucs (htdemucs fine-tuned drums, MIT) runs in-process via demucs.cpp, with no Python needed. It pulls the drum stem out of a full song, then runs Separate drums on it.
+  - **Setup:** the model (84 MB) downloads on first use and is SHA-256 verified.
+  - **Behaviour:** the extraction is multi-threaded, shows progress and can be cancelled.
+  - **Test** (real drums + bass + chords): drums SDR goes from -14.8 dB (the mix) to **20.3 dB** (the stem).
+- **Run in unison with an MPC:** MIDI clock **in** (Start / Continue / Stop / Song Position / tempo, sample-accurate, slewing so steps never repeat) and **out** (24 PPQN + Start/Stop). It works inside MPC 3 software through host sync and next to MPC hardware through the Standalone app.
+  - **Tests:** 0 samples of error at 100 BPM, and under 1.5 ms with ±1 ms of jitter.
+  - **Controls:** SEQ ▸ Clock in / Clock out.
+- **Release:** tagged builds publish an ad-hoc signed zip with licences.
+  - **Docs:** install steps in the README, an MPC guide and checklist in `MPC.md`, and the pre-release red team in `RELEASE_REDTEAM.md` (P2s fixed).
+- **Limits and fixes:** Separate drums analyses at most the first 60 s, and the AI result is discarded if the sample changed during extraction.
+
 ## 0.5.0 (2026-10-31): Teach the kit
 - **KIT ▸ Teach kick / snare / hat/cym, Clear taught** (all MIDI mappable): example hits from the loop become Separate drums' drum sounds. The learning step explains away overlapping drums and room sound, and each drum is limited to its own frequency range. The examples are tied to the loaded file.
 - **Unusual synthetic kit:** kick F1 0.80 → 0.89. **Real loops with blindly picked examples:** Duncan snare 31% → 100%, Kyle kick 47% → 42%, the rest unchanged (details in `KIT.md`).

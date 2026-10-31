@@ -4,6 +4,9 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: write # release job publishes tagged builds
+
 jobs:
   macos:
     runs-on: macos-14 # Apple Silicon
@@ -34,3 +37,26 @@ jobs:
             build/NEURO_MPC_artefacts/Release/VST3/NEURO MPC.vst3
             build/NEURO_MPC_artefacts/Release/AU/NEURO MPC.component
             build/NEURO_MPC_artefacts/Release/Standalone/NEURO MPC.app
+
+      # Tagged versions (v*): ad-hoc signed bundles + licences, zipped and published as a GitHub release.
+      - name: Package release
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          A=build/NEURO_MPC_artefacts/Release
+          for b in "$A/VST3/NEURO MPC.vst3" "$A/AU/NEURO MPC.component" "$A/Standalone/NEURO MPC.app"; do codesign --force --deep -s - "$b"; done
+          mkdir -p dist/licenses
+          cp -R "$A/VST3/NEURO MPC.vst3" "$A/AU/NEURO MPC.component" "$A/Standalone/NEURO MPC.app" dist/
+          cp LICENSE dist/LICENSE-AGPL-3.0.txt
+          cp Documentation/LICENSES.md dist/licenses/
+          cp ThirdParty/demucs.cpp/LICENSE dist/licenses/demucs.cpp-MIT.txt
+          for d in signalsmith-stretch signalsmith-linear; do cp ThirdParty/$d/LICENSE* dist/licenses/$d-LICENSE.txt; done
+          cp build/_deps/eigen-src/COPYING.MPL2 dist/licenses/Eigen-MPL2.txt
+          printf 'Source code: https://github.com/%s (AGPL-3.0)\nInstall: see README.md\n' "$GITHUB_REPOSITORY" > dist/README.txt
+          cp README.md Documentation/MPC.md dist/
+          (cd dist && zip -qry "../NEURO-MPC-${GITHUB_REF_NAME}-macOS-arm64.zip" .)
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" "NEURO-MPC-${GITHUB_REF_NAME}-macOS-arm64.zip" --title "NEURO MPC ${GITHUB_REF_NAME}" --notes-file <(awk '/^## /{n++} n==1' CHANGELOG.md)

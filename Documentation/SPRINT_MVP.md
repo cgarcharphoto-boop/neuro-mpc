@@ -11,3 +11,11 @@ MPC 3 (as a plugin) and MPC hardware (over MIDI clock), and release-grade packag
 | S4 | **Pre-release red team** (mandatory) | Deep pre-release checklist: threading, file I/O, network download, state, licensing; P1s fixed or the release is halted |
 
 Out of scope for the MVP: running on MPC standalone hardware (MPC OS does not load third-party plugins), Windows/Linux builds, notarization (needs a Developer ID).
+
+## Result (2026-10-31)
+| Story | Status | Evidence |
+|---|---|---|
+| S1 | Done | Engine test: real drums SDR -14.8 → 20.3 dB; download/verify/cancel paths |
+| S2 | Done | Core + engine tests: Start on the exact sample, 0-sample error, <1.5 ms with jitter, clock send exact |
+| S3 | Done | Release job (dry run: 28 MB zip, ad-hoc signed, licences); README install; MPC.md |
+| S4 | Done: GO | RELEASE_REDTEAM.md: 5 P2 fixed, P3s listed (pluginval, notarization, manual host sessions, email in history) |

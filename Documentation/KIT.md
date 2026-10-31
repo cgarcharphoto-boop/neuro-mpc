@@ -80,6 +80,14 @@ Generic drum sounds can't fit every kit. **Teach kick / Teach snare / Teach hat/
 
 The groove check is only a proxy. A real accuracy figure needs a hand-labelled set, e.g. IDMT-SMT-Drums or ENST-Drums, used for evaluation only. For one-shot kits, the per-slice classifier remains more reliable.
 
+## Extract drums (AI) for full songs (`Source/AI/DrumExtractor`)
+- **How:** KIT ▸ **Extract drums (AI)** runs Demucs (Meta, MIT; the `htdemucs_ft` drums model) in-process through demucs.cpp (MIT, Eigen). There is no Python or GPU dependency.
+- **Model:** the first click downloads the model (84 MB, SHA-256 pinned) to `~/Library/Application Support/NEURO MPC/Models`.
+- **Output:** the drum stem is saved as `<name> (drums).wav` in `~/Music/NEURO MPC/Separated`, loaded, and then **Separate drums** runs on it (on the first 60 s).
+- **Speed** (M4 Max): about 3.4× slower than real time per thread. Songs over 20 s are split across cores with 1 s of cross-faded context.
+- **Cancel:** clicking again cancels; the button returns immediately.
+- **Quality** (real Apple Drummer loop + bass + chords): drums SDR goes from -14.8 dB (the mix) to **20.3 dB** (the stem).
+
 ## Limitations
 - The classifier is heuristic and tuned on synthetic drums; expect overrides on real kits, e.g. claps/rims vs snares, or toms vs tonal bass hits.
 - Loop length assumes a power-of-two number of beats at the host tempo.

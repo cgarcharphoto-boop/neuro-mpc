@@ -1530,6 +1530,19 @@ int main()
             std::printf ("  AI drums: %.1f s for %.1f s of audio; drums SDR: mix %.1f dB -> stem %.1f dB %s\n", seconds,
                          song.getNumSamples() / songRate, mixSdr, stemSdr, aiError.toRawUTF8());
             CHECK (stemSdr > mixSdr + 6.0);
+
+            // Cancel is prompt (the model reports progress often) and leaves a clean, reusable state.
+            CHECK (sp.loadSample (mixFile, error) && sp.startExtractDrums());
+            juce::Thread::sleep (500);
+            const auto c0 = juce::Time::getMillisecondCounterHiRes();
+            sp.cancelAi();
+            const auto returnMs = juce::Time::getMillisecondCounterHiRes() - c0;
+            while (sp.getAiState() == NeuroMPCProcessor::AiState::extracting && juce::Time::getMillisecondCounterHiRes() - c0 < 5000.0)
+                juce::Thread::sleep (10);
+            const auto stopMs = juce::Time::getMillisecondCounterHiRes() - c0;
+            std::printf ("  AI cancel: returns in %.1f ms (UI never blocks), job stopped after %.0f ms, state '%s'\n", returnMs, stopMs,
+                         sp.getAiMessage().toRawUTF8());
+            CHECK (returnMs < 5.0 && stopMs < 3000.0 && sp.getAiState() == NeuroMPCProcessor::AiState::failed && sp.getAiMessage() == "Cancelled");
             stem.deleteFile();
         }
         else

@@ -94,7 +94,7 @@ NeuroMPCProcessor::NeuroMPCProcessor()
 NeuroMPCProcessor::~NeuroMPCProcessor()
 {
     stopTimer();
-    cancelAi();
+    cancelAi (true);
     modelDownload.reset();
 }
 
@@ -1365,6 +1365,21 @@ bool NeuroMPCProcessor::computeDrums (const neuro::SampleData& source, juce::Aud
     stereo.copyFrom (0, 0, source.buffer, 0, 0, n);
     stereo.copyFrom (1, 0, source.buffer, juce::jmin (1, source.buffer.getNumChannels() - 1), 0, n);
 
+    // The model parser trusts the file: only a byte-exact model is loaded (checked once per run, ~0.3 s).
+    static std::atomic<bool> modelVerified { false };
+
+    if (! modelVerified)
+    {
+        if (juce::SHA256 (getDrumModelFile()).toHexString() != drumModelSha256)
+        {
+            getDrumModelFile().deleteFile();
+            error = "The AI model file was damaged and has been removed: click Get AI model to download it again";
+            return false;
+        }
+
+        modelVerified = true;
+    }
+
     const auto modelLength = (int) std::ceil ((double) n * neuro::demucs::sampleRate / sr);
     const auto in = resample (stereo, n, sr, neuro::demucs::sampleRate, modelLength);
     std::vector<float> left, right;
@@ -1439,6 +1454,16 @@ juce::File NeuroMPCProcessor::finishExtractDrums()
         source = std::move (aiSource);
     }
 
+    {
+        const std::scoped_lock lock (modelLock);
+
+        if (sample != source) // another sample was loaded meanwhile: keep it
+        {
+            setAiState (AiState::idle, "Sample changed during extraction: result discarded");
+            return {};
+        }
+    }
+
     const auto file = separatedDirectory().getChildFile (source->file.getFileNameWithoutExtension() + " (drums).wav");
     juce::String error;
 
@@ -1471,11 +1496,11 @@ juce::File NeuroMPCProcessor::extractDrumsBlocking (juce::String& error)
     return finishExtractDrums();
 }
 
-void NeuroMPCProcessor::cancelAi()
+void NeuroMPCProcessor::cancelAi (bool wait)
 {
     aiJob.cancel = true;
 
-    if (aiThread.joinable())
+    if (wait && aiThread.joinable())
         aiThread.join();
 }
 
@@ -1534,8 +1559,10 @@ NeuroMPCProcessor::DeconstructSummary NeuroMPCProcessor::separateDrums (int patt
 
     const auto original = sample; // keep it alive while we replace the loaded sample
     const auto& buffer = original->buffer;
-    const auto length = original->length();
     const auto sr = original->sampleRate;
+    // At most the first 60 s (memory ~100 MB, ~1 s on the message thread): a pattern uses 4 bars; a full AI-extracted
+    // song would otherwise freeze the UI and need gigabytes.
+    const auto length = juce::jmin (original->length(), (int64_t) (60.0 * sr));
     const auto numChannels = buffer.getNumChannels();
 
     if (bpm <= 0.0)
