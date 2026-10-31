@@ -237,6 +237,17 @@ NeuroMPCEditor::NeuroMPCEditor (NeuroMPCProcessor& p) : AudioProcessorEditor (p)
             if (r.perClass[(size_t) c] > 0) text << "  " << neuro::drumClassName ((neuro::DrumClass) c) << " " << r.perClass[(size_t) c];
         kitInfo.setText (r.hits > 0 ? text : juce::String ("Load a loop first"), juce::dontSendNotification);
     };
+    separateButton.setTooltip ("Split a mixed drum loop into Kick / Snare / Cymbals stems (NMF), find every drum's hits, "
+                               "and build a pattern whose lanes play the isolated drums on their own outputs");
+    separateButton.onClick = [this]
+    {
+        const auto r = proc.separateDrums (proc.getSelectedSeqPattern());
+        juce::String text;
+        text << r.hits << " hits at " << juce::roundToInt (r.bpm) << " BPM:";
+        for (int c = 0; c < neuro::numDrumClasses; ++c)
+            if (r.perClass[(size_t) c] > 0) text << "  " << neuro::drumClassName ((neuro::DrumClass) c) << " " << r.perClass[(size_t) c];
+        kitInfo.setText (r.hits > 0 ? text + "  -> stems: " + r.stems.getFileName() : juce::String ("Load a drum loop first"), juce::dontSendNotification);
+    };
     retargetButton.setTooltip ("Turn exact-slice steps into timbre points: the pattern then re-orchestrates itself on any kit");
     retargetButton.onClick = [this]
     {
@@ -1061,7 +1072,7 @@ void NeuroMPCEditor::registerMappables()
              { &mutIntensity, "evolve.intensity" }, { &mutPreserve, "evolve.preserve" }, { &mutDensity, "evolve.density" },
              { &mutPitch, "evolve.pitchRange" }, { &mutVelocity, "evolve.velocityRange" }, { &mutTiming, "evolve.timingRange" },
              { &mutSeed, "evolve.seed" }, { &kitTab, "view.kit" }, { &sliceClass, "kit.sliceClass" }, { &laneClass, "kit.laneClass" },
-             { &hitSensitivity, "kit.hitSensitivity" }, { &deconstructButton, "kit.deconstruct" }, { &retargetButton, "kit.retarget" },
+             { &hitSensitivity, "kit.hitSensitivity" }, { &deconstructButton, "kit.deconstruct" }, { &separateButton, "kit.separate" }, { &retargetButton, "kit.retarget" },
              { &stepToSlice, "kit.stepToSlice" }, { &stepToTimbre, "kit.stepToTimbre" }, { &stepToPad, "kit.stepToPad" } })
         id (*c, name);
 
@@ -1458,7 +1469,7 @@ std::vector<juce::Component*> NeuroMPCEditor::seqPanelComponents()
 
 std::vector<juce::Component*> NeuroMPCEditor::kitPanelComponents()
 {
-    std::vector<juce::Component*> list { &timbreMap, &kitTitle, &kitInfo, &chordInfo, &sliceClass, &laneClass, &chordMode, &chordInput,
+    std::vector<juce::Component*> list { &separateButton, &timbreMap, &kitTitle, &kitInfo, &chordInfo, &sliceClass, &laneClass, &chordMode, &chordInput,
                                          &hitSensitivity, &chordSplit, &deconstructButton, &retargetButton, &stepToSlice, &stepToTimbre, &stepToPad };
 
     for (auto& k : classLevels)
@@ -2184,11 +2195,13 @@ void NeuroMPCEditor::resized()
         r0.removeFromLeft (6);
         laneClass.setBounds (r0.removeFromLeft (180));
         auto r1 = row();
-        deconstructButton.setBounds (r1.removeFromLeft (130));
-        r1.removeFromLeft (48);
-        hitSensitivity.setBounds (r1.removeFromLeft (150));
+        separateButton.setBounds (r1.removeFromLeft (112));
         r1.removeFromLeft (6);
-        retargetButton.setBounds (r1.removeFromLeft (130));
+        deconstructButton.setBounds (r1.removeFromLeft (120));
+        r1.removeFromLeft (44);
+        hitSensitivity.setBounds (r1.removeFromLeft (110));
+        r1.removeFromLeft (6);
+        retargetButton.setBounds (r1.removeFromLeft (124));
         auto r2 = row();
         for (auto* b : { &stepToSlice, &stepToTimbre, &stepToPad })
         {

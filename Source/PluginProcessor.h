@@ -146,9 +146,14 @@ public:
     bool canUndoSeqPattern (int index) const { return ! seqUndo[(size_t) juce::jlimit (0, numSeqPatterns - 1, index)].empty(); }
     // Loop Deconstructor: slices the loaded loop at its hits, classifies each hit (kick, snare, hats, toms, cymbals...),
     // and writes a pattern with one lane per kit piece (exact slice, velocity and microtiming per hit).
-    struct DeconstructSummary { int hits = 0, steps = 0; double bpm = 0.0; std::array<int, neuro::numDrumClasses> perClass {}; };
+    struct DeconstructSummary { int hits = 0, steps = 0; double bpm = 0.0; std::array<int, neuro::numDrumClasses> perClass {}; juce::File stems; };
     // bpm <= 0: estimate the loop's tempo from the audio. sensitivity 0.7 catches hits on decaying tails.
     DeconstructSummary deconstructLoop (int patternIndex, double bpm = 0.0, float sensitivity = 0.7f);
+    // Separate drums (NMF): splits a mixed drum loop into Kick / Snare / Cymbals / Residual stems (they sum back to
+    // the original), detects every drum's hits (simultaneous hits count for each), writes the stems to a WAV and loads it,
+    // and builds a pattern whose lanes play the isolated drums on their own outputs. The residual plays bar by bar.
+    DeconstructSummary separateDrums (int patternIndex, double bpm = 0.0);
+
     // Converts exact-slice steps into timbre-map points, so the pattern re-orchestrates itself on any kit.
     int retargetPatternToTimbre (int patternIndex);
     double getLastHostBpm() const noexcept { return lastHostBpm.load(); }

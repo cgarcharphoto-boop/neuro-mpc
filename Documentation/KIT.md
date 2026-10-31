@@ -52,6 +52,28 @@ Combined with the per-class outputs, each kit piece arrives on its own mixer tra
   - On Mason, Duncan and Gavin, most backbeat snares were read as kicks: the hats already ringing in the 1–5 kHz band mask the snare crack.
   - Separating drums *inside* a mixed recording is a known hard problem (automatic drum transcription; state of the art uses trained neural networks). Use the per-slice class override, or isolated one-shots, which classify far better.
 
+## Separate drums (NMF), for full-kit recordings (`Source/Core/DrumNMF.h`)
+- **Method:** semi-adaptive NMF after Wu & Lerch (ISMIR 2015). The magnitude spectrogram (96 log bands, 2048/512 STFT) is factorised with **kick, snare and hi-hat/cymbal** templates, adapted to the loop but kept ≥ 70% anchored to their initial shapes, plus 2 free components.
+- **Hits:** onsets come from the log-rise of each activation, so a hit on top of another drum's tail still registers. Hits are refined to the sample on the attack. Simultaneous hits count for **each** drum. A co-occurrence rule removes kick↔snare crosstalk, and the cymbal ring length separates closed hat / open hat / ride / crash.
+- **Stems:** Wiener-style soft masks give **Kick / Snare / Cymbals / Residual** stems that **sum back to the original** (109 dB SNR in tests; 108 dB through the 24-bit stems file in `~/Music/NEURO MPC/Separated/`).
+- **Pattern:** KIT ▸ **Separate drums** loads the stems file, slices each stem at its own hits, and builds a pattern whose lanes play **isolated** drums on their own outputs. The residual (room, toms, anything unmodelled) plays bar by bar on the Perc lane.
+- **No tom component:** in testing it captured the attacks of kicks and snares, so toms fall into the nearest drum or the residual.
+
+**Synthetic mixed loop** (kick/snare + hats playing together): kick 100/100%, snare 100/100%, hats 100% precision / 88% recall (precision / recall); exact timing.
+
+**Real Apple Drummer loops** (no hand labels; *groove check* = % of kicks on beats 1/3 and % of snares on 2/4):
+
+| Loop | Kick 1/3 | Snare 2/4 | Notes |
+|---|---|---|---|
+| Rose | 67% | **100%** | clean 8th-note hats |
+| Duncan | 50% | 31% | kick is **four-on-the-floor** (every beat: correct, but the metric only counts 1/3); 8th hats |
+| Tyrell | 40% | 44% | |
+| Kyle | 47% | 31% | |
+| Mason | 40% | 17% | busy ghost notes → snare crosstalk |
+| Gavin | 0% | 5% | snares fall on beat 3 (likely a **half-time** groove, where the metric doesn't apply) |
+
+The groove check is only a proxy. A real accuracy figure needs a hand-labelled set, e.g. IDMT-SMT-Drums or ENST-Drums, used for evaluation only. For one-shot kits, the per-slice classifier remains more reliable.
+
 ## Limitations
 - The classifier is heuristic and tuned on synthetic drums; expect overrides on real kits, e.g. claps/rims vs snares, or toms vs tonal bass hits.
 - Loop length assumes a power-of-two number of beats at the host tempo.

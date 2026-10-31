@@ -2,6 +2,7 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
 #include "Core/TransientDetector.h"
+#include "Core/DrumNMF.h"
 
 static int failures = 0;
 
@@ -1314,6 +1315,72 @@ int main()
         CHECK (std::abs (midiOf (x, 4800 + block, 9600) - 57.0) < 0.05);
         setParam (cl, ParamIDs::chordLock, 0.0f);
         toneFile.deleteFile();
+    }
+
+    // ---- Separate drums (NMF): simultaneous hits -> both lanes; isolated stems on their own outputs; stems sum back ----
+    {
+        juce::AudioBuffer<float> mix (1, (int) rate * 2);   // 1 bar at 120 BPM: kick 1/3, snare 2/4, hats every 8th
+        mix.clear();
+        juce::Random rng (5);
+        auto add = [&] (int kind, int at, float gain)
+        {
+            float phase = 0.0f, hp = 0.0f, prev = 0.0f, lp = 0.0f, lp2 = 0.0f;
+            for (int i = 0; i < 12000 && at + i < mix.getNumSamples(); ++i)
+            {
+                const auto t = (float) i / (float) rate;
+                const auto n = rng.nextFloat() * 2.0f - 1.0f;
+                float v;
+                if (kind == 0)      { phase += 6.2831853f * (50.0f + 70.0f * std::exp (-t / 0.03f)) / (float) rate; v = std::sin (phase) * std::exp (-t / 0.12f); }
+                else if (kind == 1) { lp += 0.54f * (n - lp); lp2 += 0.1f * (n - lp2); v = 0.4f * std::sin (6.2831853f * 190.0f * t) * std::exp (-t / 0.06f) + 1.2f * (lp - lp2) * std::exp (-t / 0.12f); }
+                else                { hp = 0.98f * (hp + n - prev); prev = n; lp += 0.6f * (hp - lp); v = (hp - lp) * std::exp (-t / 0.025f); }
+                mix.addSample (0, at + i, 0.7f * gain * v);
+            }
+        };
+        for (int b = 0; b < 4; ++b) { add (b % 2, b * 24000, 1.0f); add (2, b * 24000, 0.5f); add (2, b * 24000 + 12000, 0.5f); }
+        const auto mixFile = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("neuro_mix.wav");
+        mixFile.deleteFile();
+        {
+            juce::WavAudioFormat wav;
+            std::unique_ptr<juce::OutputStream> out (mixFile.createOutputStream().release());
+            if (auto writer = wav.createWriterFor (out, juce::AudioFormatWriterOptions().withSampleRate (rate).withNumChannels (1).withBitsPerSample (24)))
+                writer->writeFromAudioSampleBuffer (mix, 0, mix.getNumSamples());
+        }
+
+        NeuroMPCProcessor sp;
+        auto layout = sp.getBusesLayout();
+        for (auto& bus : layout.outputBuses) bus = juce::AudioChannelSet::stereo();
+        CHECK (sp.setBusesLayout (layout));
+        sp.prepareToPlay (rate, block);
+        CHECK (sp.loadSample (mixFile, error));
+        const auto sep = sp.separateDrums (0, 120.0);
+        std::printf ("  separated: %d hits (kick %d, snare %d, closed hat %d), stems %s\n", sep.hits, sep.perClass[0], sep.perClass[1],
+                     sep.perClass[2], sep.stems.getFileName().toRawUTF8());
+        CHECK (sep.stems.existsAsFile() && sp.getSample()->length() == neuro::nmf::numStems * mix.getNumSamples());
+        const auto& pat = sp.getSeqPattern (0);
+        for (int c = 0; c < neuro::numDrumClasses; ++c)
+        {
+            juce::String g;
+            for (int i = 0; i < 16; ++i) g << (pat.lanes[(size_t) c].steps[(size_t) i].on ? "x" : ".");
+            if (g.containsChar ('x')) std::printf ("    %-10s %s\n", neuro::drumClassName ((neuro::DrumClass) c), g.toRawUTF8());
+        }
+        CHECK (pat.lanes[(size_t) neuro::DrumClass::kick].steps[0].on && pat.lanes[(size_t) neuro::DrumClass::kick].steps[8].on);
+        CHECK (pat.lanes[(size_t) neuro::DrumClass::snare].steps[4].on && pat.lanes[(size_t) neuro::DrumClass::snare].steps[12].on);
+        CHECK (pat.lanes[(size_t) neuro::DrumClass::closedHat].steps[0].on && pat.lanes[(size_t) neuro::DrumClass::closedHat].steps[4].on); // with kick / snare
+
+        // Stems in the file sum back to the original mix.
+        double err = 0.0, ref = 0.0;
+        for (int i = 0; i < mix.getNumSamples(); ++i)
+        {
+            float sum = 0.0f;
+            for (int s = 0; s < neuro::nmf::numStems; ++s) sum += sp.getSample()->buffer.getSample (0, s * mix.getNumSamples() + i);
+            err += (double) (sum - mix.getSample (0, i)) * (sum - mix.getSample (0, i));
+            ref += (double) mix.getSample (0, i) * mix.getSample (0, i);
+        }
+        const auto snr = 10.0 * std::log10 (ref / std::max (err, 1.0e-20));
+        std::printf ("  stems file reconstruction: %.0f dB SNR (24-bit file)\n", snr);
+        CHECK (snr > 40.0);
+        mixFile.deleteFile();
+        sep.stems.deleteFile();
     }
 
     // Missing file on restore is reported, not substituted.

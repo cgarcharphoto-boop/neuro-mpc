@@ -1,4 +1,5 @@
 #include "Core/Arpeggiator.h"
+#include "Core/DrumNMF.h"
 #include "Core/KeyDetector.h"
 #include "Core/MidiMap.h"
 #include "Core/PadBank.h"
@@ -11,6 +12,7 @@
 #include "Core/SliceSet.h"
 #include "Core/TransientDetector.h"
 
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <random>
@@ -1081,6 +1083,69 @@ static void timbreTests()
     CHECK (analyseTimbre (sil, 1, (int64_t) silence.size(), sr).silent);
 }
 
+static void drumNmfTests()
+{
+    // 2 bars at 120 BPM: kicks on beats 1 and 3, snares on 2 and 4, closed hats on every 8th (also on top of kick/snare).
+    const auto beat = (int64_t) (sr * 0.5);
+    std::vector<float> mix ((size_t) (8 * beat + sr), 0.0f);
+    std::vector<int64_t> kicks, snares, hats;
+    auto add = [&] (DrumClass c, int64_t at, float gain)
+    {
+        const auto x = synthDrum (c, (uint32_t) at);
+        for (size_t i = 0; i < x.size() && (size_t) at + i < mix.size(); ++i) mix[(size_t) at + i] += gain * x[i];
+    };
+
+    for (int b = 0; b < 8; ++b)
+    {
+        (b % 2 == 0 ? kicks : snares).push_back (b * beat);
+        add (b % 2 == 0 ? DrumClass::kick : DrumClass::snare, b * beat, 1.0f);
+        for (int e = 0; e < 2; ++e) { hats.push_back (b * beat + e * beat / 2); add (DrumClass::closedHat, b * beat + e * beat / 2, 0.5f); }
+    }
+
+    const float* ch[] = { mix.data() };
+    const auto t0 = std::chrono::steady_clock::now();
+    const auto result = nmf::separate (ch, 1, (int64_t) mix.size(), sr);
+    const auto ms = std::chrono::duration<double, std::milli> (std::chrono::steady_clock::now() - t0).count();
+
+    auto score = [&] (const std::vector<int64_t>& truth, std::initializer_list<DrumClass> classes, const char* name)
+    {
+        std::vector<int64_t> found;
+        for (auto& e : result.events) for (auto c : classes) if (e.drumClass == c) found.push_back (e.sample);
+        int hits = 0;
+        for (auto t : truth) hits += std::any_of (found.begin(), found.end(), [t] (int64_t f) { return std::llabs (f - t) <= 1024; }) ? 1 : 0;
+        const auto precision = found.empty() ? 0.0 : (double) std::min<size_t> ((size_t) hits, found.size()) / (double) found.size();
+        const auto recall = (double) hits / (double) truth.size();
+        std::printf ("  NMF %-6s precision %.2f recall %.2f (%zu found, %zu true)\n", name, precision, recall, found.size(), truth.size());
+        for (auto t : truth)
+            if (! std::any_of (found.begin(), found.end(), [t] (int64_t f) { return std::llabs (f - t) <= 1024; }))
+                std::printf ("    missed %s at beat %.1f\n", name, (double) t / (sr * 0.5));
+        return std::pair { precision, recall };
+    };
+
+    const auto k = score (kicks, { DrumClass::kick }, "kick");
+    const auto sn = score (snares, { DrumClass::snare }, "snare");
+    const auto h = score (hats, { DrumClass::closedHat, DrumClass::openHat }, "hats");
+    CHECK (k.first >= 0.9 && k.second >= 0.9 && sn.first >= 0.9 && sn.second >= 0.9 && h.first >= 0.85 && h.second >= 0.85);
+
+    // Stems add back up to the original; kick stem is low, hat stem is high.
+    double err = 0.0, ref = 0.0;
+    for (size_t i = 0; i < mix.size(); ++i)
+    {
+        float sum = 0.0f;
+        for (auto& stem : result.stems) sum += stem[0][i];
+        err += (double) (sum - mix[i]) * (sum - mix[i]);
+        ref += (double) mix[i] * mix[i];
+    }
+    const auto snrDb = 10.0 * std::log10 (ref / std::max (err, 1.0e-20));
+    const float* kickStem[] = { result.stems[nmf::kick][0].data() };
+    const float* hatStem[] = { result.stems[nmf::cymbals][0].data() };
+    const auto kf = analyseTimbre (kickStem, 1, (int64_t) mix.size(), sr);
+    const auto hf = analyseTimbre (hatStem, 1, (int64_t) mix.size(), sr);
+    std::printf ("  NMF stems: reconstruction %.0f dB SNR; kick stem low share %.2f; hat stem high share %.2f; %.0f ms for 5 s\n",
+                 snrDb, kf.low, hf.high, ms);
+    CHECK (snrDb > 60.0 && kf.low > 0.8f && hf.high > 0.6f);
+}
+
 static void keyTests()
 {
     auto print = [] (const char* name, const KeyEstimate& k)
@@ -1133,6 +1198,7 @@ int main()
     advancedSequencingTests();
     midiMapTests();
     timbreTests();
+    drumNmfTests();
     keyTests();
     std::printf (failures == 0 ? "All core tests passed\n" : "%d failure(s)\n", failures);
     return failures == 0 ? EXIT_SUCCESS : EXIT_FAILURE;

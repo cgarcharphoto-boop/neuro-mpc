@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.0 (2026-10-30): Separate drums (NMF)
+- **Separate drums:** semi-adaptive NMF (after Wu & Lerch 2015) splits mixed drum loops into Kick / Snare / Cymbals / Residual stems that sum back to the original. It detects every drum's hits, including simultaneous ones, with sample-accurate timing and kick↔snare crosstalk rejection. A pattern plays the isolated drums on their own outputs.
+- **Synthetic mixed loop:** kick and snare 100% / 100%, hats 100% / 88% (precision / recall). Real-loop results and limitations are in `KIT.md`.
+
 ## 0.3.1 (2026-10-30): field-tested
 - **Loop Deconstructor:** estimates the loop's tempo (file tempo tag, else audio autocorrelation with whole-bar disambiguation; 6/6 on real Apple Drummer loops) and uses its true 1/16 grid (up to 4 bars) instead of squeezing the loop.
 - **Hits classified in context** (band rises at each onset, stored as class overrides). Better than isolated analysis on full-kit recordings; still imperfect (see `KIT.md`).

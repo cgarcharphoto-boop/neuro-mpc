@@ -208,7 +208,7 @@ private:
     juce::Slider hitSensitivity { juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight },
                  chordSplit { juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight };
     std::array<juce::Slider, neuro::numDrumClasses> classLevels;
-    juce::TextButton deconstructButton { "Deconstruct loop" }, retargetButton { "Retarget to timbre" },
+    juce::TextButton separateButton { "Separate drums" }, deconstructButton { "Deconstruct loop" }, retargetButton { "Retarget to timbre" },
                      stepToSlice { "Step -> slice" }, stepToTimbre { "Step -> timbre" }, stepToPad { "Step -> pad" };
 
     LearnOverlay learnOverlay { *this };   // declared last: on top of everything

@@ -69,11 +69,11 @@ namespace
             if (! p.loadSample (f, error)) { std::printf ("%s: %s\n", f.getFileName().toRawUTF8(), error.toRawUTF8()); continue; }
 
             const auto seconds = (double) p.getSample()->length() / p.getSample()->sampleRate;
-            const auto r = p.deconstructLoop (0); // auto tempo
+            const auto r = p.separateDrums (0); // NMF separation + transcription, auto tempo
             std::printf ("  tempo: estimated %.1f BPM, 8-bar ground truth %.1f BPM%s\n", r.bpm, 32.0 * 60.0 / seconds,
                          bpm != 120.0 ? (" (file tag " + juce::String (bpm) + ")").toRawUTF8() : "");
             const auto& pat = p.getSeqPattern (0);
-            std::printf ("\n%s  (%.2f s, %.0f BPM from file metadata%s) -> %d hits, %d steps\n", f.getFileNameWithoutExtension().toRawUTF8(),
+            std::printf ("\n[Separate drums] %s  (%.2f s, %.0f BPM from file metadata%s) -> %d hits, %d steps\n", f.getFileNameWithoutExtension().toRawUTF8(),
                          seconds, bpm, bpm == 120.0 ? "?" : "", r.hits, r.steps);
             for (int c = 0; c < neuro::numDrumClasses; ++c)
             {

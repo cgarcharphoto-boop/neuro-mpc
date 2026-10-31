@@ -2,6 +2,7 @@
 #include "PluginEditor.h"
 #include "Core/Scales.h"
 #include "Core/TransientDetector.h"
+#include "Core/DrumNMF.h"
 
 namespace
 {
@@ -1198,6 +1199,142 @@ NeuroMPCProcessor::DeconstructSummary NeuroMPCProcessor::deconstructLoop (int pa
     editSeqPattern (patternIndex, [&] (auto& p) { p = pattern; }, Undo::always);
 
     auto* rate = apvts.getParameter (ParamIDs::seqRate); // the pattern is written in 1/16 steps
+    rate->setValueNotifyingHost (rate->convertTo0to1 (3.0f));
+    return summary;
+}
+
+NeuroMPCProcessor::DeconstructSummary NeuroMPCProcessor::separateDrums (int patternIndex, double bpm)
+{
+    const std::scoped_lock lock (modelLock);
+    DeconstructSummary summary;
+
+    if (sample == nullptr || sample->length() < 4096)
+        return summary;
+
+    const auto original = sample; // keep it alive while we replace the loaded sample
+    const auto& buffer = original->buffer;
+    const auto length = original->length();
+    const auto sr = original->sampleRate;
+    const auto numChannels = buffer.getNumChannels();
+
+    if (bpm <= 0.0)
+        bpm = original->fileTempo > 0.0 ? original->fileTempo : neuro::estimateTempo (buffer.getArrayOfReadPointers(), numChannels, length, sr);
+
+    const auto result = neuro::nmf::separate (buffer.getArrayOfReadPointers(), numChannels, length, sr);
+
+    // Stems file: [kick | snare | cymbals | residual], each the loop's length.
+    juce::AudioBuffer<float> stems (numChannels, (int) (length * neuro::nmf::numStems));
+
+    for (int s = 0; s < neuro::nmf::numStems; ++s)
+        for (int c = 0; c < numChannels; ++c)
+            stems.copyFrom (c, (int) (s * length), result.stems[(size_t) s][(size_t) c].data(), (int) length);
+
+    const auto dir = juce::File::getSpecialLocation (juce::File::userMusicDirectory).getChildFile ("NEURO MPC/Separated");
+    dir.createDirectory();
+    const auto file = dir.getChildFile (original->file.getFileNameWithoutExtension() + " (drum stems).wav");
+    file.deleteFile();
+
+    {
+        juce::WavAudioFormat wav;
+        std::unique_ptr<juce::OutputStream> out (file.createOutputStream().release());
+        auto options = juce::AudioFormatWriterOptions().withSampleRate (sr).withNumChannels (numChannels).withBitsPerSample (24);
+        auto writer = wav.createWriterFor (out, options);
+
+        if (writer == nullptr || ! writer->writeFromAudioSampleBuffer (stems, 0, stems.getNumSamples()))
+            return summary;
+    }
+
+    juce::String error;
+
+    if (! loadSample (file, error))
+        return summary;
+
+    summary.stems = file;
+    summary.bpm = bpm;
+
+    // Pattern grid: the loop's own 1/16 grid, whole bars (max 4); under a bar: as is.
+    const auto samplesPerStep = sr * 60.0 / bpm / 4.0;
+    const auto totalSteps = (double) length / samplesPerStep;
+    const auto steps = juce::jlimit (1, neuro::SeqLane::maxSteps, totalSteps < 12.0 ? (int) std::lround (totalSteps)
+                                                                                     : (int) std::lround (totalSteps / 16.0) * 16);
+    const auto barSamples = (int64_t) std::llround (samplesPerStep * 16.0);
+    const auto residualStart = length * (neuro::nmf::numStems - 1);
+
+    auto stemOf = [] (neuro::DrumClass c)
+    {
+        using D = neuro::DrumClass;
+        return c == D::kick ? neuro::nmf::kick : c == D::snare ? neuro::nmf::snare : neuro::nmf::cymbals;
+    };
+
+    std::vector<int64_t> starts;
+    for (int s = 1; s < neuro::nmf::numStems; ++s) starts.push_back (s * length);
+    for (const auto& e : result.events) starts.push_back ((int64_t) stemOf (e.drumClass) * length + e.sample);
+    for (int64_t b = barSamples; b < std::min<int64_t> (length, (int64_t) (steps * samplesPerStep)); b += barSamples) starts.push_back (residualStart + b);
+    slices.setStarts (starts);
+
+    // Classes: each stem region is its drum; hits carry their detected class; the residual is Perc.
+    for (int i = 0; i < slices.size(); ++i)
+    {
+        const auto start = slices.getSlices()[(size_t) i].startSample;
+        const auto stem = (int) (start / length);
+        auto cls = stem == neuro::nmf::kick ? neuro::DrumClass::kick : stem == neuro::nmf::snare ? neuro::DrumClass::snare
+                 : stem == neuro::nmf::cymbals ? neuro::DrumClass::closedHat : neuro::DrumClass::perc;
+        for (const auto& e : result.events)
+            if ((int64_t) stemOf (e.drumClass) * length + e.sample == start)
+                cls = e.drumClass;
+
+        slices.setDrumClass (i, (int) cls);
+    }
+
+    publishSlices();
+
+    neuro::SeqPattern pattern;
+    pattern.name = "Separated";
+    pattern.numLanes = neuro::numDrumClasses;
+
+    for (int c = 0; c < neuro::numDrumClasses; ++c)
+    {
+        auto& lane = pattern.lanes[(size_t) c];
+        lane.note = neuro::PadBank::baseNote + c;
+        lane.drumClass = c;
+        lane.name = neuro::drumClassName ((neuro::DrumClass) c);
+        lane.length = steps;
+    }
+
+    for (const auto& e : result.events)
+    {
+        const auto position = (double) e.sample / samplesPerStep;
+        const auto step = (int) std::lround (position);
+        const auto index = slices.indexAt ((int64_t) stemOf (e.drumClass) * length + e.sample);
+
+        if (step >= steps || index < 0)
+            continue;
+
+        auto& st = pattern.lanes[(size_t) e.drumClass].steps[(size_t) step];
+
+        if (! st.on || st.velocity < e.strength)
+        {
+            st = { true, juce::jlimit (0.1f, 1.0f, e.strength), 1.0f, 1.0f, 1, (float) juce::jlimit (-0.5, 0.5, position - step), 0.0f };
+            st.sliceId = slices.getSlices()[(size_t) index].id;
+        }
+
+        ++summary.hits;
+        ++summary.perClass[(size_t) e.drumClass];
+    }
+
+    // Residual bed: one slice per bar on the Perc lane, so the separated lanes plus the bed reproduce the loop.
+    for (int bar = 0; bar * 16 < steps; ++bar)
+        if (const auto index = slices.indexAt (residualStart + bar * barSamples); index >= 0)
+        {
+            auto& st = pattern.lanes[(size_t) neuro::DrumClass::perc].steps[(size_t) (bar * 16)];
+            st = { true, 1.0f, 1.0f, 1.0f, 1, 0.0f, 0.0f };
+            st.sliceId = slices.getSlices()[(size_t) index].id;
+        }
+
+    summary.steps = steps;
+    editSeqPattern (patternIndex, [&] (auto& p) { p = pattern; }, Undo::always);
+
+    auto* rate = apvts.getParameter (ParamIDs::seqRate);
     rate->setValueNotifyingHost (rate->convertTo0to1 (3.0f));
     return summary;
 }
