@@ -10,7 +10,7 @@ C++20 · JUCE 9.0.4 (pinned) · CMake · AGPL-3.0.
    `xattr -dr com.apple.quarantine ~/Library/Audio/Plug-Ins/VST3/"NEURO MPC.vst3" ~/Library/Audio/Plug-Ins/Components/"NEURO MPC.component" /path/to/"NEURO MPC.app"`
 4. Rescan plugins in your host: Logic, Live or MPC 3. To run alongside an MPC, see [Documentation/MPC.md](Documentation/MPC.md).
 
-## Status: v1.1.1, public MVP + GW-1 / KAOSS NEXUS link
+## Status: v1.1.2, public MVP + GW-1 / KAOSS NEXUS link
 
 The acceptance status of each requirement, with evidence, is in [Documentation/ACCEPTANCE.md](Documentation/ACCEPTANCE.md). **Still open:** hands-on sessions in MPC 3, Ableton Live and Logic Pro (checklist in [MPC.md](Documentation/MPC.md)), notarization. pluginval strictness 10 passes on the VST3 and AU. See [RELEASE_REDTEAM.md](Documentation/RELEASE_REDTEAM.md).
 

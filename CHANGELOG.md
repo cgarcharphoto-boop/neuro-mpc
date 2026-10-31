@@ -1,5 +1,8 @@
 # Changelog
 
+## 1.1.2 (2026-10-31): Release of the 1.1.1 fixes
+- Same features as 1.1.1. CI now builds on macOS 15 runners (GitHub retires macOS 14 images on 2026-11-02; the 1.1.1 build was cancelled by a runner brownout, so it was never released).
+
 ## 1.1.1 (2026-10-31): Fixes from the first real session
 - **Fixed: silent pads in Logic.** With every output bus enabled (Logic's multi-output instrument), analysed slices played only on per-drum aux outputs, so the main channel was silent.
   - **Now:** everything plays on the main output. **KIT ▸ Drum outputs** turns separate per-drum outputs on.
