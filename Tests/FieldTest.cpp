@@ -69,25 +69,36 @@ namespace
             if (! p.loadSample (f, error)) { std::printf ("%s: %s\n", f.getFileName().toRawUTF8(), error.toRawUTF8()); continue; }
 
             const auto seconds = (double) p.getSample()->length() / p.getSample()->sampleRate;
-            const auto r = p.separateDrums (0); // NMF separation + transcription, auto tempo
-            std::printf ("  tempo: estimated %.1f BPM, 8-bar ground truth %.1f BPM%s\n", r.bpm, 32.0 * 60.0 / seconds,
-                         bpm != 120.0 ? (" (file tag " + juce::String (bpm) + ")").toRawUTF8() : "");
-            const auto& pat = p.getSeqPattern (0);
-            std::printf ("\n[Separate drums] %s  (%.2f s, %.0f BPM from file metadata%s) -> %d hits, %d steps\n", f.getFileNameWithoutExtension().toRawUTF8(),
-                         seconds, bpm, bpm == 120.0 ? "?" : "", r.hits, r.steps);
-            for (int c = 0; c < neuro::numDrumClasses; ++c)
+            for (int pass = 0; pass < 2; ++pass) // generic, then taught (examples a user would pick in bar 1)
             {
-                const auto& lane = pat.lanes[(size_t) c];
-                if (r.perClass[(size_t) c] == 0) continue;
-                juce::String grid;
-                for (int i = 0; i < juce::jmin (32, lane.length); ++i) grid << (lane.steps[(size_t) i].on ? (i % 4 == 0 ? "X" : "x") : (i % 4 == 0 ? "|" : "."));
-                std::printf ("  %-10s %3d  %s\n", neuro::drumClassName ((neuro::DrumClass) c), r.perClass[(size_t) c], grid.toRawUTF8());
+                if (pass == 1)
+                {
+                    const auto spb = p.getSample()->sampleRate * 60.0 / (bpm != 120.0 ? bpm : 32.0 * 60.0 / seconds);
+                    p.loadSample (f, error);
+                    p.teachDrumRange (neuro::nmf::kick, 0, (int64_t) (0.1 * p.getSample()->sampleRate));
+                    p.teachDrumRange (neuro::nmf::snare, (int64_t) spb, (int64_t) (spb + 0.1 * p.getSample()->sampleRate));
+                    p.teachDrumRange (neuro::nmf::cymbals, (int64_t) (spb / 2), (int64_t) (spb / 2 + 0.1 * p.getSample()->sampleRate));
+                }
+                const auto r = p.separateDrums (0); // NMF separation + transcription, auto tempo
+                std::printf ("  tempo: estimated %.1f BPM, 8-bar ground truth %.1f BPM%s\n", r.bpm, 32.0 * 60.0 / seconds,
+                             bpm != 120.0 ? (" (file tag " + juce::String (bpm) + ")").toRawUTF8() : "");
+                const auto& pat = p.getSeqPattern (0);
+                std::printf ("\n[Separate drums%s] %s  (%.2f s, %.0f BPM from file metadata%s) -> %d hits, %d steps\n", pass == 1 ? ", taught" : "", f.getFileNameWithoutExtension().toRawUTF8(),
+                             seconds, bpm, bpm == 120.0 ? "?" : "", r.hits, r.steps);
+                for (int c = 0; c < neuro::numDrumClasses; ++c)
+                {
+                    const auto& lane = pat.lanes[(size_t) c];
+                    if (r.perClass[(size_t) c] == 0) continue;
+                    juce::String grid;
+                    for (int i = 0; i < juce::jmin (32, lane.length); ++i) grid << (lane.steps[(size_t) i].on ? (i % 4 == 0 ? "X" : "x") : (i % 4 == 0 ? "|" : "."));
+                    std::printf ("  %-10s %3d  %s\n", neuro::drumClassName ((neuro::DrumClass) c), r.perClass[(size_t) c], grid.toRawUTF8());
+                }
+                const auto kickOnDownbeats = fractionOn (pat.lanes[(size_t) neuro::DrumClass::kick], { 0, 8 });
+                const auto snareOnBackbeat = fractionOn (pat.lanes[(size_t) neuro::DrumClass::snare], { 4, 12 });
+                std::printf ("  groove check: kicks on beats 1/3: %s   snares on beats 2/4: %s\n",
+                             kickOnDownbeats < 0 ? "n/a" : juce::String (juce::roundToInt (kickOnDownbeats * 100)).toRawUTF8(),
+                             snareOnBackbeat < 0 ? "n/a" : juce::String (juce::roundToInt (snareOnBackbeat * 100)).toRawUTF8());
             }
-            const auto kickOnDownbeats = fractionOn (pat.lanes[(size_t) neuro::DrumClass::kick], { 0, 8 });
-            const auto snareOnBackbeat = fractionOn (pat.lanes[(size_t) neuro::DrumClass::snare], { 4, 12 });
-            std::printf ("  groove check: kicks on beats 1/3: %s   snares on beats 2/4: %s\n",
-                         kickOnDownbeats < 0 ? "n/a" : juce::String (juce::roundToInt (kickOnDownbeats * 100)).toRawUTF8(),
-                         snareOnBackbeat < 0 ? "n/a" : juce::String (juce::roundToInt (snareOnBackbeat * 100)).toRawUTF8());
         }
     }
 

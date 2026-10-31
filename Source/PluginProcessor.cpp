@@ -1203,6 +1203,51 @@ NeuroMPCProcessor::DeconstructSummary NeuroMPCProcessor::deconstructLoop (int pa
     return summary;
 }
 
+int NeuroMPCProcessor::teachDrumRange (int component, int64_t start, int64_t end)
+{
+    const std::scoped_lock lock (modelLock);
+
+    if (sample == nullptr || component < 0 || component >= neuro::nmf::numDrumComponents || start < 0 || end <= start)
+        return 0;
+
+    if (taughtFile != sample->file)
+    {
+        taughtDrums.clear();
+        taughtFile = sample->file;
+    }
+
+    taughtDrums.push_back ({ component, start, std::min (end, sample->length()) });
+    return getTaughtCounts()[(size_t) component];
+}
+
+int NeuroMPCProcessor::teachDrum (int component, int sliceIndex)
+{
+    const std::scoped_lock lock (modelLock);
+
+    if (sample == nullptr || sliceIndex < 0 || sliceIndex >= slices.size())
+        return 0;
+
+    const auto& s = slices.getSlices()[(size_t) sliceIndex];
+    return teachDrumRange (component, s.startSample, std::min (s.endSample, s.startSample + (int64_t) (0.12 * sample->sampleRate)));
+}
+
+void NeuroMPCProcessor::clearTaughtDrums()
+{
+    const std::scoped_lock lock (modelLock);
+    taughtDrums.clear();
+}
+
+std::array<int, neuro::nmf::numDrumComponents> NeuroMPCProcessor::getTaughtCounts() const
+{
+    const std::scoped_lock lock (modelLock);
+    std::array<int, neuro::nmf::numDrumComponents> counts {};
+
+    if (sample != nullptr && taughtFile == sample->file)
+        for (const auto& e : taughtDrums) ++counts[(size_t) e.component];
+
+    return counts;
+}
+
 NeuroMPCProcessor::DeconstructSummary NeuroMPCProcessor::separateDrums (int patternIndex, double bpm)
 {
     const std::scoped_lock lock (modelLock);
@@ -1220,7 +1265,8 @@ NeuroMPCProcessor::DeconstructSummary NeuroMPCProcessor::separateDrums (int patt
     if (bpm <= 0.0)
         bpm = original->fileTempo > 0.0 ? original->fileTempo : neuro::estimateTempo (buffer.getArrayOfReadPointers(), numChannels, length, sr);
 
-    const auto result = neuro::nmf::separate (buffer.getArrayOfReadPointers(), numChannels, length, sr);
+    const auto result = neuro::nmf::separate (buffer.getArrayOfReadPointers(), numChannels, length, sr, 60,
+                                              taughtFile == original->file ? taughtDrums : std::vector<neuro::nmf::Example> {});
 
     // Stems file: [kick | snare | cymbals | residual], each the loop's length.
     juce::AudioBuffer<float> stems (numChannels, (int) (length * neuro::nmf::numStems));
@@ -1251,6 +1297,7 @@ NeuroMPCProcessor::DeconstructSummary NeuroMPCProcessor::separateDrums (int patt
 
     summary.stems = file;
     summary.bpm = bpm;
+    summary.taught = taughtFile == original->file && ! taughtDrums.empty();
 
     // Pattern grid: the loop's own 1/16 grid, whole bars (max 4); under a bar: as is.
     const auto samplesPerStep = sr * 60.0 / bpm / 4.0;

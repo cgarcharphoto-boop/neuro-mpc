@@ -3,6 +3,7 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <juce_audio_formats/juce_audio_formats.h>
 #include "Audio/VoiceEngine.h"
+#include "Core/DrumNMF.h"
 #include "Core/Arpeggiator.h"
 #include "Core/MidiMap.h"
 #include "Core/RtShared.h"
@@ -146,13 +147,19 @@ public:
     bool canUndoSeqPattern (int index) const { return ! seqUndo[(size_t) juce::jlimit (0, numSeqPatterns - 1, index)].empty(); }
     // Loop Deconstructor: slices the loaded loop at its hits, classifies each hit (kick, snare, hats, toms, cymbals...),
     // and writes a pattern with one lane per kit piece (exact slice, velocity and microtiming per hit).
-    struct DeconstructSummary { int hits = 0, steps = 0; double bpm = 0.0; std::array<int, neuro::numDrumClasses> perClass {}; juce::File stems; };
+    struct DeconstructSummary { int hits = 0, steps = 0; double bpm = 0.0; std::array<int, neuro::numDrumClasses> perClass {}; juce::File stems; bool taught = false; };
     // bpm <= 0: estimate the loop's tempo from the audio. sensitivity 0.7 catches hits on decaying tails.
     DeconstructSummary deconstructLoop (int patternIndex, double bpm = 0.0, float sensitivity = 0.7f);
     // Separate drums (NMF): splits a mixed drum loop into Kick / Snare / Cymbals / Residual stems (they sum back to
     // the original), detects every drum's hits (simultaneous hits count for each), writes the stems to a WAV and loads it,
     // and builds a pattern whose lanes play the isolated drums on their own outputs. The residual plays bar by bar.
     DeconstructSummary separateDrums (int patternIndex, double bpm = 0.0);
+    // Teach the kit: example hits (kick / snare / hats-cymbals = nmf::Component) of the loaded loop become Separate drums'
+    // templates. Examples belong to the loaded file; teaching on another file starts over. Returns that drum's count.
+    int teachDrum (int component, int sliceIndex);
+    int teachDrumRange (int component, int64_t start, int64_t end);
+    void clearTaughtDrums();
+    std::array<int, neuro::nmf::numDrumComponents> getTaughtCounts() const;
 
     // Converts exact-slice steps into timbre-map points, so the pattern re-orchestrates itself on any kit.
     int retargetPatternToTimbre (int patternIndex);
@@ -347,6 +354,8 @@ private:
     static constexpr int sliceAuditionTag = 1000; // note tags above the MIDI range
 
     mutable std::recursive_mutex modelLock;
+    std::vector<neuro::nmf::Example> taughtDrums; // guarded by modelLock
+    juce::File taughtFile;
     juce::ValueTree pendingSliceTree; // slices of a missing sample, applied on relink
     bool loadedNewerVersion = false;
     juce::File presetDirectory;

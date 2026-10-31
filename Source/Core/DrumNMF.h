@@ -24,6 +24,10 @@ inline constexpr int numStems = numDrumComponents + 1; // + residual
 
 struct Event { int64_t sample; float strength; DrumClass drumClass; };
 
+// "Teach the kit": an example hit of one drum component (sample range in the loop, attack first). Its spectrum replaces
+// the generic template; other drums sounding at the same time are explained away by their own templates.
+struct Example { int component; int64_t start, end; };
+
 struct Result
 {
     std::vector<Event> events;                         // all classes, time order
@@ -71,7 +75,8 @@ namespace detail
     }
 }
 
-inline Result separate (const float* const* channels, int numChannels, int64_t numSamples, double sampleRate, int iterations = 60)
+inline Result separate (const float* const* channels, int numChannels, int64_t numSamples, double sampleRate, int iterations = 60,
+                        const std::vector<Example>& examples = {})
 {
     using namespace detail;
     Result result;
@@ -125,7 +130,101 @@ inline Result separate (const float* const* channels, int numChannels, int64_t n
         }
 
     // ---- Semi-adaptive NMF (KL divergence, multiplicative updates) ----
-    const auto init = templates();
+    auto init = templates();
+    std::array<bool, numDrumComponents> taught {};
+
+    // Taught templates: KL fit of one free template on the example frames while fixed templates explain the rest of
+    // the mix there: the other drums (generic, and taught when already learned) plus a flat broadband "room" template.
+    // So a kick example with a crash on top, or a snare example with the kick under it, still learns just that drum.
+    // Order hats -> kick -> snare: a snare example often contains a kick, a kick example often a hat.
+    const auto generic = init;
+
+    for (const auto j : { (int) cymbals, (int) kick, (int) snare })
+    {
+        std::vector<int> cols;
+
+        for (const auto& e : examples)
+            if (e.component == j)
+                for (auto t = (int) (e.start / hop); t <= (int) (std::min (e.end, e.start + (int64_t) (0.1 * sampleRate)) / hop) + 1 && t < frames; ++t)
+                    if (t >= 0) cols.push_back (t);
+
+        if (cols.empty())
+            continue;
+
+        std::vector<std::array<float, bands>> fixed;
+        for (int c = 0; c < numDrumComponents; ++c)
+            if (c != j)
+            {
+                fixed.push_back (generic[(size_t) c]);
+                if (taught[(size_t) c]) fixed.push_back (init[(size_t) c]);
+            }
+        fixed.emplace_back().fill (1.0f / bands);
+
+        const auto n = cols.size();
+        const auto numCols = fixed.size() + 1; // last = the template being learned
+        std::array<float, bands> w {};
+        std::vector<float> h (numCols * n, 1.0f), ratio ((size_t) bands * n);
+
+        for (int b = 0; b < bands; ++b)
+        {
+            for (auto t : cols) w[(size_t) b] += V[(size_t) (b * frames + t)];
+            w[(size_t) b] += 1.0e-6f;
+        }
+
+        auto column = [&] (size_t c, int b) { return c < fixed.size() ? fixed[c][(size_t) b] : w[(size_t) b]; };
+
+        // Soft range of the drum (1 inside, log-frequency fall-off outside): the example shapes that drum's sound, while
+        // whatever else rings there (a crash on the downbeat, room) cannot become part of it.
+        std::array<float, bands> range {};
+        for (int b = 0; b < bands; ++b)
+        {
+            const auto hz = bandCentre (b);
+            auto fall = [hz] (double edge, double octaves) { const auto d = std::log2 (hz / edge) / octaves; return std::exp (-0.5 * d * d); };
+            range[(size_t) b] = (float) (j == kick ? (hz < 250.0 ? 1.0 : std::max (0.03, fall (250.0, 1.0)))
+                                       : j == snare ? (hz < 120.0 ? fall (120.0, 0.7) : hz < 8000.0 ? 1.0 : fall (8000.0, 0.7))
+                                                    : (hz > 2000.0 ? 1.0 : fall (2000.0, 1.0)));
+        }
+
+        for (int it = 0; it < 60; ++it)
+        {
+            float wSum = 0.0f;
+            for (auto v : w) wSum += v;
+            for (auto& v : w) v /= wSum;
+
+            for (size_t i = 0; i < n; ++i)
+                for (int b = 0; b < bands; ++b)
+                {
+                    float model = 1.0e-9f;
+                    for (size_t c = 0; c < numCols; ++c) model += column (c, b) * h[c * n + i];
+                    ratio[(size_t) b * n + i] = V[(size_t) (b * frames + cols[i])] / model;
+                }
+
+            for (size_t c = 0; c < numCols; ++c)
+                for (size_t i = 0; i < n; ++i)
+                {
+                    float num = 0.0f, den = 1.0e-9f;
+                    for (int b = 0; b < bands; ++b) { num += column (c, b) * ratio[(size_t) b * n + i]; den += column (c, b); }
+                    h[c * n + i] *= num / den;
+                }
+
+            const auto self = numCols - 1;
+            float hSum = 1.0e-9f;
+            for (size_t i = 0; i < n; ++i) hSum += h[self * n + i];
+
+            for (int b = 0; b < bands; ++b)
+            {
+                float num = 0.0f;
+                for (size_t i = 0; i < n; ++i) num += ratio[(size_t) b * n + i] * h[self * n + i];
+                w[(size_t) b] *= num / hSum * range[(size_t) b];
+            }
+        }
+
+        float wSum = 0.0f;
+        for (auto v : w) wSum += v;
+        for (int b = 0; b < bands; ++b) init[(size_t) j][(size_t) b] = w[(size_t) b] / wSum;
+        taught[(size_t) j] = true;
+    }
+
     std::vector<float> W ((size_t) (bands * numComponents)), H ((size_t) (numComponents * frames), 1.0f);
     uint32_t rng = 12345u;
     auto random = [&rng] { rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5; return 0.5f + (float) (rng % 1000) / 1000.0f; };
@@ -174,7 +273,7 @@ inline Result separate (const float* const* channels, int numChannels, int64_t n
 
         product();
         for (size_t i = 0; i < V.size(); ++i) ratio[i] = V[i] / WH[i];
-        const auto keep = std::max (0.3f, 1.0f - (float) it / (float) iterations); // drum templates adapt gradually
+        const auto keep = std::max (0.3f, 1.0f - (float) it / (float) iterations); // generic templates adapt gradually
 
         for (int j = 0; j < numComponents; ++j) // W update
         {
@@ -190,8 +289,11 @@ inline Result separate (const float* const* channels, int numChannels, int64_t n
                 auto& w = W[(size_t) (b * numComponents + j)];
                 w *= num / rowSum;
 
-                if (j < numDrumComponents)
-                    w = keep * init[(size_t) j][(size_t) b] + (1.0f - keep) * w;
+                if (j < numDrumComponents) // taught templates are the real drum: they stay close to the example
+                {
+                    const auto anchor = taught[(size_t) j] ? std::max (0.5f, keep) : keep;
+                    w = anchor * init[(size_t) j][(size_t) b] + (1.0f - anchor) * w;
+                }
 
                 norm += w;
             }

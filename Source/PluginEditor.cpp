@@ -246,8 +246,29 @@ NeuroMPCEditor::NeuroMPCEditor (NeuroMPCProcessor& p) : AudioProcessorEditor (p)
         text << r.hits << " hits at " << juce::roundToInt (r.bpm) << " BPM:";
         for (int c = 0; c < neuro::numDrumClasses; ++c)
             if (r.perClass[(size_t) c] > 0) text << "  " << neuro::drumClassName ((neuro::DrumClass) c) << " " << r.perClass[(size_t) c];
+        if (r.taught) text << "  (taught kit)";
         kitInfo.setText (r.hits > 0 ? text + "  -> stems: " + r.stems.getFileName() : juce::String ("Load a drum loop first"), juce::dontSendNotification);
     };
+    auto taughtText = [this]
+    {
+        const auto n = proc.getTaughtCounts();
+        return juce::String ("Taught: kick ") + juce::String (n[0]) + ", snare " + juce::String (n[1]) + ", hat/cym " + juce::String (n[2]);
+    };
+    for (auto [button, component] : { std::pair { &teachKick, (int) neuro::nmf::kick }, { &teachSnare, (int) neuro::nmf::snare }, { &teachHat, (int) neuro::nmf::cymbals } })
+    {
+        button->setTooltip ("Teach Separate drums what this drum sounds like in this loop: select a slice on one clear hit, then click "
+                            "(several examples are averaged)");
+        button->onClick = [this, component, taughtText]
+        {
+            const auto sel = waveform.getSelectedSlice();
+            kitInfo.setText (sel >= 0 && proc.teachDrum (component, sel) > 0 ? taughtText() + "  -> now Separate drums"
+                                                                              : juce::String ("Select a slice on a hit of that drum first"),
+                             juce::dontSendNotification);
+        };
+    }
+    teachClear.setTooltip ("Forget the taught examples (Separate drums uses its generic drum sounds)");
+    teachClear.onClick = [this, taughtText] { proc.clearTaughtDrums(); kitInfo.setText (taughtText(), juce::dontSendNotification); };
+
     retargetButton.setTooltip ("Turn exact-slice steps into timbre points: the pattern then re-orchestrates itself on any kit");
     retargetButton.onClick = [this]
     {
@@ -1073,7 +1094,8 @@ void NeuroMPCEditor::registerMappables()
              { &mutPitch, "evolve.pitchRange" }, { &mutVelocity, "evolve.velocityRange" }, { &mutTiming, "evolve.timingRange" },
              { &mutSeed, "evolve.seed" }, { &kitTab, "view.kit" }, { &sliceClass, "kit.sliceClass" }, { &laneClass, "kit.laneClass" },
              { &hitSensitivity, "kit.hitSensitivity" }, { &deconstructButton, "kit.deconstruct" }, { &separateButton, "kit.separate" }, { &retargetButton, "kit.retarget" },
-             { &stepToSlice, "kit.stepToSlice" }, { &stepToTimbre, "kit.stepToTimbre" }, { &stepToPad, "kit.stepToPad" } })
+             { &stepToSlice, "kit.stepToSlice" }, { &stepToTimbre, "kit.stepToTimbre" }, { &stepToPad, "kit.stepToPad" },
+             { &teachKick, "kit.teachKick" }, { &teachSnare, "kit.teachSnare" }, { &teachHat, "kit.teachHat" }, { &teachClear, "kit.teachClear" } })
         id (*c, name);
 
     for (int pc = 0; pc < 12; ++pc)
@@ -1470,7 +1492,8 @@ std::vector<juce::Component*> NeuroMPCEditor::seqPanelComponents()
 std::vector<juce::Component*> NeuroMPCEditor::kitPanelComponents()
 {
     std::vector<juce::Component*> list { &separateButton, &timbreMap, &kitTitle, &kitInfo, &chordInfo, &sliceClass, &laneClass, &chordMode, &chordInput,
-                                         &hitSensitivity, &chordSplit, &deconstructButton, &retargetButton, &stepToSlice, &stepToTimbre, &stepToPad };
+                                         &hitSensitivity, &chordSplit, &deconstructButton, &retargetButton, &stepToSlice, &stepToTimbre, &stepToPad,
+                                         &teachKick, &teachSnare, &teachHat, &teachClear };
 
     for (auto& k : classLevels)
         list.push_back (&k);
@@ -2207,6 +2230,12 @@ void NeuroMPCEditor::resized()
         {
             b->setBounds (r2.removeFromLeft (110));
             r2.removeFromLeft (6);
+        }
+        auto rTeach = row();
+        for (auto* b : { &teachKick, &teachSnare, &teachHat, &teachClear })
+        {
+            b->setBounds (rTeach.removeFromLeft (110));
+            rTeach.removeFromLeft (6);
         }
         auto r3 = row();
         chordMode.setBounds (r3.removeFromLeft (190));

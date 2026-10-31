@@ -209,7 +209,8 @@ private:
                  chordSplit { juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight };
     std::array<juce::Slider, neuro::numDrumClasses> classLevels;
     juce::TextButton separateButton { "Separate drums" }, deconstructButton { "Deconstruct loop" }, retargetButton { "Retarget to timbre" },
-                     stepToSlice { "Step -> slice" }, stepToTimbre { "Step -> timbre" }, stepToPad { "Step -> pad" };
+                     stepToSlice { "Step -> slice" }, stepToTimbre { "Step -> timbre" }, stepToPad { "Step -> pad" },
+                     teachKick { "Teach kick" }, teachSnare { "Teach snare" }, teachHat { "Teach hat/cym" }, teachClear { "Clear taught" };
 
     LearnOverlay learnOverlay { *this };   // declared last: on top of everything
     std::array<juce::TextButton, 4> stepPageButtons;

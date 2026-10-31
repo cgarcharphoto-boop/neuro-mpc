@@ -1357,12 +1357,6 @@ int main()
                      sep.perClass[2], sep.stems.getFileName().toRawUTF8());
         CHECK (sep.stems.existsAsFile() && sp.getSample()->length() == neuro::nmf::numStems * mix.getNumSamples());
         const auto& pat = sp.getSeqPattern (0);
-        for (int c = 0; c < neuro::numDrumClasses; ++c)
-        {
-            juce::String g;
-            for (int i = 0; i < 16; ++i) g << (pat.lanes[(size_t) c].steps[(size_t) i].on ? "x" : ".");
-            if (g.containsChar ('x')) std::printf ("    %-10s %s\n", neuro::drumClassName ((neuro::DrumClass) c), g.toRawUTF8());
-        }
         CHECK (pat.lanes[(size_t) neuro::DrumClass::kick].steps[0].on && pat.lanes[(size_t) neuro::DrumClass::kick].steps[8].on);
         CHECK (pat.lanes[(size_t) neuro::DrumClass::snare].steps[4].on && pat.lanes[(size_t) neuro::DrumClass::snare].steps[12].on);
         CHECK (pat.lanes[(size_t) neuro::DrumClass::closedHat].steps[0].on && pat.lanes[(size_t) neuro::DrumClass::closedHat].steps[4].on); // with kick / snare
@@ -1379,6 +1373,21 @@ int main()
         const auto snr = 10.0 * std::log10 (ref / std::max (err, 1.0e-20));
         std::printf ("  stems file reconstruction: %.0f dB SNR (24-bit file)\n", snr);
         CHECK (snr > 40.0);
+
+        // Teach the kit: examples belong to the loop file; separation uses them and still finds the groove.
+        CHECK (sp.loadSample (mixFile, error) && sp.getTaughtCounts()[0] == 0);
+        CHECK (sp.teachDrumRange (neuro::nmf::kick, 0, 4800) == 1 && sp.teachDrumRange (neuro::nmf::snare, 24000, 28800) == 1
+               && sp.teachDrumRange (neuro::nmf::cymbals, 12000, 16800) == 1);
+        const auto taught = sp.separateDrums (0, 120.0);
+        const auto& tp = sp.getSeqPattern (0);
+        std::printf ("  taught kit: %d hits (kick %d, snare %d, closed hat %d)\n", taught.hits, taught.perClass[0], taught.perClass[1], taught.perClass[2]);
+        CHECK (taught.taught && tp.lanes[(size_t) neuro::DrumClass::kick].steps[0].on && tp.lanes[(size_t) neuro::DrumClass::kick].steps[8].on
+               && tp.lanes[(size_t) neuro::DrumClass::snare].steps[4].on && tp.lanes[(size_t) neuro::DrumClass::snare].steps[12].on
+               && tp.lanes[(size_t) neuro::DrumClass::closedHat].steps[2].on);
+        CHECK (sp.getTaughtCounts()[0] == 0);             // the stems file is now loaded: examples were for the mix
+        CHECK (sp.loadSample (mixFile, error) && sp.getTaughtCounts()[0] == 1); // back on the mix: still taught
+        sp.clearTaughtDrums();
+        CHECK (sp.getTaughtCounts()[0] == 0);
         mixFile.deleteFile();
         sep.stems.deleteFile();
     }

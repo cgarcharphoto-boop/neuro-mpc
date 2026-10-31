@@ -1146,6 +1146,63 @@ static void drumNmfTests()
     CHECK (snrDb > 60.0 && kf.low > 0.8f && hf.high > 0.6f);
 }
 
+// "Teach the kit" on an unusual kit the generic templates misread: a high pitched tom-like kick (220 Hz) and a dark
+// lo-fi snare (noise below ~1.5 kHz + 400 Hz body), hats on 8ths. One taught example per drum.
+static void teachKitTests()
+{
+    const auto beat = (int64_t) (sr * 0.5);
+    std::vector<float> mix ((size_t) (8 * beat + sr), 0.0f);
+    std::vector<int64_t> kicks, snares, hats;
+    uint32_t rng = 777u;
+    auto noise = [&rng] { rng = rng * 1664525u + 1013904223u; return (float) (rng >> 9) / 4194304.0f - 1.0f; };
+    auto add = [&] (int which, int64_t at)
+    {
+        if (which == 2)
+        {
+            const auto h = synthDrum (DrumClass::closedHat, (uint32_t) at);
+            for (size_t i = 0; i < h.size() && (size_t) at + i < mix.size(); ++i) mix[(size_t) at + i] += 0.5f * h[i];
+            return;
+        }
+
+        float lp = 0.0f;
+        for (int64_t i = 0; i < (int64_t) (0.3 * sr) && (size_t) (at + i) < mix.size(); ++i)
+        {
+            const auto t = (float) i / (float) sr;
+            if (which == 1) lp += 0.2f * (noise() - lp);
+            mix[(size_t) (at + i)] += (which == 0 ? std::sin (6.2831853f * 220.0f * t) * std::exp (-t / 0.08f)
+                                                  : (2.5f * lp + 0.5f * std::sin (6.2831853f * 400.0f * t)) * std::exp (-t / 0.09f));
+        }
+    };
+
+    for (int b = 0; b < 8; ++b)
+    {
+        (b % 2 == 0 ? kicks : snares).push_back (b * beat);
+        add (b % 2 == 0 ? 0 : 1, b * beat);
+        for (int e = 0; e < 2; ++e) { hats.push_back (b * beat + e * beat / 2); add (2, b * beat + e * beat / 2); }
+    }
+
+    const float* ch[] = { mix.data() };
+    auto f1 = [&] (const nmf::Result& r, const std::vector<int64_t>& truth, std::initializer_list<DrumClass> classes)
+    {
+        std::vector<int64_t> found;
+        for (auto& e : r.events) for (auto c : classes) if (e.drumClass == c) found.push_back (e.sample);
+        int hits = 0;
+        for (auto t : truth) hits += std::any_of (found.begin(), found.end(), [t] (int64_t f) { return std::llabs (f - t) <= 1024; }) ? 1 : 0;
+        const auto precision = found.empty() ? 0.0 : (double) std::min<size_t> ((size_t) hits, found.size()) / (double) found.size();
+        const auto recall = (double) hits / (double) truth.size();
+        return precision + recall > 0.0 ? 2.0 * precision * recall / (precision + recall) : 0.0;
+    };
+
+    const auto generic = nmf::separate (ch, 1, (int64_t) mix.size(), sr);
+    // Examples as a user would tag them: the kick and snare on beats 1 and 2 (hats sound with them), a hat on the "and".
+    const auto taught = nmf::separate (ch, 1, (int64_t) mix.size(), sr, 60,
+                                       { { nmf::kick, 0, beat / 2 }, { nmf::snare, beat, beat * 3 / 2 }, { nmf::cymbals, beat / 2, beat } });
+    const double g[] { f1 (generic, kicks, { DrumClass::kick }), f1 (generic, snares, { DrumClass::snare }), f1 (generic, hats, { DrumClass::closedHat, DrumClass::openHat }) };
+    const double t[] { f1 (taught, kicks, { DrumClass::kick }), f1 (taught, snares, { DrumClass::snare }), f1 (taught, hats, { DrumClass::closedHat, DrumClass::openHat }) };
+    std::printf ("  teach the kit (unusual kit, F1 kick/snare/hats): generic %.2f/%.2f/%.2f -> taught %.2f/%.2f/%.2f\n", g[0], g[1], g[2], t[0], t[1], t[2]);
+    CHECK (t[0] > g[0] && t[1] >= 0.9 && t[2] >= 0.85); // the misread drum improves, the others stay right
+}
+
 static void keyTests()
 {
     auto print = [] (const char* name, const KeyEstimate& k)
@@ -1199,6 +1256,7 @@ int main()
     midiMapTests();
     timbreTests();
     drumNmfTests();
+    teachKitTests();
     keyTests();
     std::printf (failures == 0 ? "All core tests passed\n" : "%d failure(s)\n", failures);
     return failures == 0 ? EXIT_SUCCESS : EXIT_FAILURE;

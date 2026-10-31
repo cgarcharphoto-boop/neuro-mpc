@@ -72,6 +72,12 @@ Combined with the per-class outputs, each kit piece arrives on its own mixer tra
 | Mason | 40% | 17% | busy ghost notes → snare crosstalk |
 | Gavin | 0% | 5% | snares fall on beat 3 (likely a **half-time** groove, where the metric doesn't apply) |
 
+### Teach the kit
+Generic drum sounds can't fit every kit. **Teach kick / Teach snare / Teach hat/cym** use the selected slice (one clear hit of that drum) as an example. Several examples are averaged, and **Clear taught** forgets them. The examples belong to the loaded loop: they survive reloading it, and are ignored on any other file. All four buttons are MIDI mappable.
+- Each example's sound is learned while the other drums (generic, plus any already taught) and a broadband "room" template explain everything else sounding at that moment. So a kick example with a crash on top, or a snare example with a kick under it, still learns just that drum. Each drum is also limited to a soft frequency range (kick lows, snare mids, cymbal highs), and taught sounds stay ≥ 50% anchored to the example during separation.
+- **Unusual synthetic kit** (a 220 Hz tom-like kick the generic kick sound misreads): kick F1 goes from 0.80 to 0.89, with snare and hats unchanged at 1.00.
+- **Real loops, with examples picked blindly** (bar 1: beat 1 = kick, beat 2 = snare, the "and" of 1 = hat, crash/kick overlaps included): Duncan's snare goes from 31% to **100%** on 2/4, and Kyle's kick drops slightly (47% → 42%). Rose, Mason, Tyrell and Gavin are unchanged. Hand-picked clean hits should do at least as well.
+
 The groove check is only a proxy. A real accuracy figure needs a hand-labelled set, e.g. IDMT-SMT-Drums or ENST-Drums, used for evaluation only. For one-shot kits, the per-slice classifier remains more reliable.
 
 ## Limitations

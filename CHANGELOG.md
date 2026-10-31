@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.0 (2026-10-31): Teach the kit
+- **KIT ▸ Teach kick / snare / hat/cym, Clear taught** (all MIDI mappable): example hits from the loop become Separate drums' drum sounds. The learning step explains away overlapping drums and room sound, and each drum is limited to its own frequency range. The examples are tied to the loaded file.
+- **Unusual synthetic kit:** kick F1 0.80 → 0.89. **Real loops with blindly picked examples:** Duncan snare 31% → 100%, Kyle kick 47% → 42%, the rest unchanged (details in `KIT.md`).
+
 ## 0.4.0 (2026-10-30): Separate drums (NMF)
 - **Separate drums:** semi-adaptive NMF (after Wu & Lerch 2015) splits mixed drum loops into Kick / Snare / Cymbals / Residual stems that sum back to the original. It detects every drum's hits, including simultaneous ones, with sample-accurate timing and kick↔snare crosstalk rejection. A pattern plays the isolated drums on their own outputs.
 - **Synthetic mixed loop:** kick and snare 100% / 100%, hats 100% / 88% (precision / recall). Real-loop results and limitations are in `KIT.md`.
