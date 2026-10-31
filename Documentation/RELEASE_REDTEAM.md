@@ -17,7 +17,7 @@ Deep pre-release checklist (BMad Quality Suite), adapted to a desktop audio plug
 | 5 | P2 | **Clock-follow drift** (Domain expert): an early tempo guess plus the no-backwards guard locked a constant ~145-sample offset. | The position slews back onto the clock (never backwards). 0 samples of error at 100 BPM, <1.5 ms with ±1 ms jitter. Tested. |
 | 6 | P2 | **Integer overflow** (Implementer): the resampled length `n * 44100` overflowed for >48k samples, causing bad_alloc in the worker. | Computed in double. Covered by the AI test on 8 s of real audio. |
 | 7 | P3 | **No notarization** (Skeptical user): Gatekeeper blocks ad-hoc signed builds. | README gives the `xattr` step. Notarization needs an Apple Developer ID (open). |
-| 8 | P3 | **pluginval not run** on the VST3 (Implementer). | Open: run `pluginval --strictness-level 5` before announcing. auval passes. |
+| 8 | P3 | **pluginval** (Implementer). | **Done (v1.1.0, 2026-10-31): strictness 10, `--validate-in-process`, SUCCESS on the VST3 and the AU.**<br>AU warnings, both benign:<br>• "Current program is -1": presets live in NEURO's own browser, with no host program slots.<br>• "Disabling non-main buses failed": AU output elements are fixed once loaded. NEURO's layout check accepts disabled class outputs, which is why the VST3 shows no warning. |
 | 9 | P3 | **Real-host sessions** in MPC 3 / Logic / Live not yet done by a person. | Manual checklist in `MPC.md`. Automated host-sync and clock tests pass. |
 | 10 | P3 | **Personal email in git history** (Bad actor, privacy): commits use the author's personal address. | Owner decision before making the repo public (keep it, or rewrite to a GitHub noreply address). |
 

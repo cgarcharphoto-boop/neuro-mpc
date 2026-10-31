@@ -12,7 +12,7 @@ C++20 · JUCE 9.0.4 (pinned) · CMake · AGPL-3.0.
 
 ## Status: v1.1.0, public MVP + GW-1 / KAOSS NEXUS link
 
-The acceptance status of each requirement, with evidence, is in [Documentation/ACCEPTANCE.md](Documentation/ACCEPTANCE.md). **Still open:** hands-on sessions in MPC 3, Ableton Live and Logic Pro (checklist in [MPC.md](Documentation/MPC.md)), a pluginval run on the VST3, notarization. See [RELEASE_REDTEAM.md](Documentation/RELEASE_REDTEAM.md).
+The acceptance status of each requirement, with evidence, is in [Documentation/ACCEPTANCE.md](Documentation/ACCEPTANCE.md). **Still open:** hands-on sessions in MPC 3, Ableton Live and Logic Pro (checklist in [MPC.md](Documentation/MPC.md)), notarization. pluginval strictness 10 passes on the VST3 and AU. See [RELEASE_REDTEAM.md](Documentation/RELEASE_REDTEAM.md).
 
 | Feature | |
 |---|---|
