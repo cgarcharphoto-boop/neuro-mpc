@@ -29,11 +29,9 @@ include(FetchContent)
 FetchContent_Declare(eigen
     URL https://gitlab.com/libeigen/eigen/-/archive/dd8c71e62852b2fe429edb6682ac91fd1c578a26/eigen-dd8c71e62852b2fe429edb6682ac91fd1c578a26.tar.gz
     URL_HASH SHA256=e8cbc003b1fa5e0d0d142c58155aaf341f87783d213d31a605a19b2f13d27acc
-    DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
-FetchContent_GetProperties(eigen)
-if(NOT eigen_POPULATED)
-    FetchContent_Populate(eigen) # headers only: no add_subdirectory (Eigen's own tests/targets are not needed)
-endif()
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+    SOURCE_SUBDIR headers-only) # no such directory: headers only, Eigen's own CMake targets/tests are not added
+FetchContent_MakeAvailable(eigen)
 file(GLOB DEMUCS_SOURCES ThirdParty/demucs.cpp/src/*.cpp)
 add_library(neuro_demucs STATIC ${DEMUCS_SOURCES} Source/AI/DrumExtractor.cpp)
 target_include_directories(neuro_demucs SYSTEM PRIVATE ThirdParty/demucs.cpp/src ${eigen_SOURCE_DIR})
