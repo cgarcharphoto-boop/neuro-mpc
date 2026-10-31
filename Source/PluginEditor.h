@@ -167,7 +167,7 @@ private:
     // Step sequencer panel
     SeqGrid seqGrid { proc };
     juce::Label seqTitle, seqName, seqInfo;
-    juce::ComboBox seqPatternBox, seqModeBox, seqRateBox, laneNote;
+    juce::ComboBox seqPatternBox, seqModeBox, seqRateBox, laneNote, laneOut;
     juce::Slider seqSwing { juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight },
                  stepVelocity { juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight },
                  stepGate { juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight },
@@ -177,7 +177,7 @@ private:
                  stepPitch { juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight },
                  laneLength { juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight };
     juce::TextButton seqDuplicate { "Duplicate" }, seqClear { "Clear" }, lanePageButton { "Lanes 1-8" }, seqUndo { "Undo" }, seqRedo { "Redo" };
-    juce::ToggleButton seqFill { "Fill" }, clockIn { "Clock in" }, clockOut { "Clock out" };
+    juce::ToggleButton seqFill { "Fill" }, clockIn { "Clock in" }, clockOut { "Clock out" }, linkPort { "Link port" };
     juce::ComboBox stepCondition;
 
     // Evolve panel: transformations, mutation (genome), recombination, phrase weaving

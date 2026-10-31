@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.1.0 (2026-10-31): Runs in unison with GW-1 and KAOSS NEXUS
+- **Lane output:** SEQ ▸ **Out: sampler / MIDI ch N / sampler + MIDI ch N** per lane. MIDI lanes send note on/off on the step's exact sample to the plugin's MIDI output (Live: route to GW-1).
+- **Link port:** SEQ ▸ **Link port** opens the virtual MIDI source **NEURO MPC**, which carries MIDI lanes and clock to GW-1, KAOSS NEXUS or any app (Logic, standalone). The audio thread hands messages to a 1 ms sender thread through a lock-free FIFO.
+- **Partners:** GW-1 v2.5 and KAOSS NEXUS v1.2 follow MIDI clock (shared `MidiClock.h`) when no host transport plays.
+- **Docs:** setup click by click in `Documentation/GMNI_LINK.md`.
+
 ## 1.0.0 (2026-10-31): Public MVP
 - **Extract drums (AI):** Demucs (htdemucs fine-tuned drums, MIT) runs in-process via demucs.cpp, with no Python needed. It pulls the drum stem out of a full song, then runs Separate drums on it.
   - **Setup:** the model (84 MB) downloads on first use and is SHA-256 verified.

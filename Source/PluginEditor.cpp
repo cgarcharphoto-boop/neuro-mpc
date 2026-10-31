@@ -356,6 +356,9 @@ NeuroMPCEditor::NeuroMPCEditor (NeuroMPCProcessor& p) : AudioProcessorEditor (p)
     attachButton (seqFill, ParamIDs::seqFill);
     attachButton (clockIn, ParamIDs::clockIn);
     attachButton (clockOut, ParamIDs::clockOut);
+    attachButton (linkPort, ParamIDs::linkPort);
+    linkPort.setTooltip ("Open the virtual MIDI port 'NEURO MPC': MIDI-out lanes and clock for GW-1, KAOSS NEXUS or any app "
+                         "(select 'NEURO MPC' as their MIDI input)");
     clockIn.setTooltip ("Follow MIDI clock (e.g. an MPC as master) when the host transport is not playing: Seq 'host transport', "
                         "arp and LFO sync then run in unison with it, Start / Stop / Song Position included");
     clockOut.setTooltip ("Send MIDI clock (24 PPQN + Start / Stop) from NEURO's transport, so an MPC set to sync to MIDI clock follows "
@@ -598,6 +601,21 @@ NeuroMPCEditor::NeuroMPCEditor (NeuroMPCProcessor& p) : AudioProcessorEditor (p)
     {
         proc.editSeqPattern (proc.getSelectedSeqPattern(), [this, n = laneNote.getSelectedId() - 1] (auto& pat)
                              { pat.lanes[(size_t) seqGrid.selectedLane].note = n; });
+    };
+    // Lane output: id 1 = sampler; 2..17 = MIDI ch 1..16; 18..33 = sampler + MIDI ch 1..16.
+    laneOut.addItem ("Out: sampler", 1);
+    for (int c = 1; c <= 16; ++c) laneOut.addItem ("Out: MIDI ch " + juce::String (c), 1 + c);
+    for (int c = 1; c <= 16; ++c) laneOut.addItem ("Out: sampler + MIDI ch " + juce::String (c), 17 + c);
+    laneOut.setTooltip ("Where this lane plays: the sampler, MIDI out (plugin MIDI output and the 'NEURO MPC' port, e.g. to GW-1), or both");
+    laneOut.onChange = [this]
+    {
+        const auto id = laneOut.getSelectedId();
+        proc.editSeqPattern (proc.getSelectedSeqPattern(), [this, id] (auto& pat)
+        {
+            auto& lane = pat.lanes[(size_t) seqGrid.selectedLane];
+            lane.output = id <= 1 ? 0 : id <= 17 ? 1 : 2;
+            lane.midiChannel = id <= 1 ? lane.midiChannel : id <= 17 ? id - 1 : id - 17;
+        });
     };
     laneLength.setRange (1, neuro::SeqLane::maxSteps, 1);
     laneLength.setTooltip ("Steps in this lane; lanes of different lengths run as polymeters");
@@ -1103,7 +1121,7 @@ void NeuroMPCEditor::registerMappables()
              { &addRule, "gen.addRule" }, { &removeRule, "gen.removeRule" }, { &clearRules, "gen.clearRules" },
              { &grammarPresets, "gen.grammarPreset" },
              { &seqDuplicate, "seq.duplicate" }, { &seqClear, "seq.clear" }, { &lanePageButton, "seq.lanePage" },
-             { &seqUndo, "seq.undo" }, { &seqRedo, "seq.redo" }, { &stepCondition, "seq.stepCondition" }, { &laneNote, "seq.laneNote" },
+             { &seqUndo, "seq.undo" }, { &seqRedo, "seq.redo" }, { &stepCondition, "seq.stepCondition" }, { &laneNote, "seq.laneNote" }, { &laneOut, "seq.laneOut" },
              { &stepVelocity, "seq.stepVelocity" }, { &stepGate, "seq.stepGate" }, { &stepChance, "seq.stepChance" },
              { &stepRatchet, "seq.stepRatchet" }, { &stepMicro, "seq.stepMicro" }, { &stepPitch, "seq.stepPitch" },
              { &laneLength, "seq.laneLength" },
@@ -1504,7 +1522,7 @@ std::vector<juce::Component*> NeuroMPCEditor::seqPanelComponents()
     std::vector<juce::Component*> list { &seqGrid, &seqTitle, &seqName, &seqInfo, &seqPatternBox, &seqModeBox, &seqRateBox,
                                          &laneNote, &seqSwing, &stepVelocity, &stepGate, &stepChance, &stepRatchet, &stepMicro,
                                          &stepPitch, &laneLength, &seqDuplicate, &seqClear, &lanePageButton, &seqUndo, &seqRedo,
-                                         &seqFill, &stepCondition, &clockIn, &clockOut };
+                                         &seqFill, &stepCondition, &clockIn, &clockOut, &laneOut, &linkPort };
 
     for (auto& b : stepPageButtons)
         list.push_back (&b);
@@ -1614,6 +1632,7 @@ void NeuroMPCEditor::updateSeqPanel()
             slider->setValue (value, juce::dontSendNotification);
 
     laneNote.setSelectedId (lane.note + 1, juce::dontSendNotification);
+    laneOut.setSelectedId (lane.output == 0 ? 1 : (lane.output == 1 ? 1 : 17) + juce::jlimit (1, 16, lane.midiChannel), juce::dontSendNotification);
 
     {
         using C = neuro::SeqCondition;
@@ -2164,6 +2183,7 @@ void NeuroMPCEditor::resized()
         r1.removeFromLeft (8);
         clockIn.setBounds (r1.removeFromLeft (76));
         clockOut.setBounds (r1.removeFromLeft (84));
+        linkPort.setBounds (r1.removeFromLeft (84));
         r1.removeFromLeft (8);
         seqInfo.setBounds (r1);
 
@@ -2183,9 +2203,11 @@ void NeuroMPCEditor::resized()
             sld->setBounds (stepRow.removeFromLeft (cellWidth));
         }
 
-        laneNote.setBounds (laneRow.removeFromLeft (190));
-        laneRow.removeFromLeft (56);
-        laneLength.setBounds (laneRow.removeFromLeft (200));
+        laneNote.setBounds (laneRow.removeFromLeft (150));
+        laneRow.removeFromLeft (4);
+        laneOut.setBounds (laneRow.removeFromLeft (170));
+        laneRow.removeFromLeft (52);
+        laneLength.setBounds (laneRow.removeFromLeft (150));
         laneRow.removeFromLeft (12);
         stepCondition.setBounds (laneRow.removeFromLeft (190));
     }

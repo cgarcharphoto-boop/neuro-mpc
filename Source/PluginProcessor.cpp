@@ -79,6 +79,7 @@ NeuroMPCProcessor::NeuroMPCProcessor()
     chordSplitParam = apvts.getRawParameterValue (ParamIDs::chordSplit);
     clockInParam    = apvts.getRawParameterValue (ParamIDs::clockIn);
     clockOutParam   = apvts.getRawParameterValue (ParamIDs::clockOut);
+    linkPortParam   = apvts.getRawParameterValue (ParamIDs::linkPort);
     padNoteHeld.fill (-1);
 
     for (int i = 0; i < neuro::padsPerBank; ++i)
@@ -94,6 +95,7 @@ NeuroMPCProcessor::NeuroMPCProcessor()
 NeuroMPCProcessor::~NeuroMPCProcessor()
 {
     stopTimer();
+    linkPortOut.close();
     cancelAi (true);
     modelDownload.reset();
 }
@@ -234,7 +236,9 @@ juce::AudioProcessorValueTreeState::ParameterLayout NeuroMPCProcessor::createLay
                 // Run in unison with an MPC: follow its MIDI clock when the host transport is not playing (e.g.
                 // standalone), and/or send clock (24 PPQN + Start/Stop) from NEURO's transport.
                 std::make_unique<AudioParameterBool> (ParameterID { ParamIDs::clockIn, 1 }, "Follow MIDI Clock", true),
-                std::make_unique<AudioParameterBool> (ParameterID { ParamIDs::clockOut, 1 }, "Send MIDI Clock", false));
+                std::make_unique<AudioParameterBool> (ParameterID { ParamIDs::clockOut, 1 }, "Send MIDI Clock", false),
+                // Virtual MIDI source "NEURO MPC": MIDI-out lanes and clock for GW-1, KAOSS NEXUS, other apps.
+                std::make_unique<AudioParameterBool> (ParameterID { ParamIDs::linkPort, 1 }, "MIDI Link Port", false));
     return layout;
 }
 
@@ -527,8 +531,21 @@ void NeuroMPCProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     {
         const auto mode = (int) seqModeParam->load();
         const auto running = mode == 1 ? hostPpq.has_value() : mode == 2;
-        auto seqSink = [&] (int offset, int note, float velocity, float pitch, const neuro::SeqTarget& target)
+        auto seqSink = [&] (int offset, int key, float velocity, float pitch, const neuro::SeqTarget& target)
         {
+            // MIDI-out lanes (e.g. to GW-1): note on/off on the lane's channel; sampler-only and "both" lanes also play.
+            const auto route = neuro::decodeRoutedNote (key);
+            const auto note = route.note;
+
+            if (route.output >= 1 && numLinkEvents < (int) linkEvents.size())
+            {
+                const auto status = (uint8_t) ((velocity > 0.0f ? 0x90 : 0x80) | (route.channel - 1));
+                linkEvents[(size_t) numLinkEvents++] = { offset, { status, (uint8_t) note, (uint8_t) juce::jlimit (velocity > 0.0f ? 1 : 0, 127, juce::roundToInt (velocity * 127.0f)) }, 3 };
+            }
+
+            if (route.output == 1)
+                return;
+
             // Resolve sound targets against the current kit: exact slice, or nearest slice on the timbre map.
             auto slice = -1;
 
@@ -646,15 +663,30 @@ void NeuroMPCProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
 
     renderWithModulation (outs, pos, numSamples);
 
-    // MIDI out: only NEURO's clock (incoming MIDI is not echoed). Follows whichever transport drives NEURO: host,
-    // MIDI clock in (then it is a thru), or the sequencer's free-running clock.
+    // MIDI out (plugin output + "NEURO MPC" port): MIDI-out lanes and NEURO's clock; incoming MIDI is not echoed. The
+    // clock follows whichever transport drives NEURO: host, MIDI clock in (then it is a thru), or the free-running seq.
     midi.clear();
     {
         const auto freeRunning = (int) seqModeParam->load() == 2;
         const auto running = clockOutParam->load() > 0.5f && (hostPpq.has_value() || freeRunning);
         const auto beat = hostPpq ? *hostPpq : seqFreeOrigin - numSamples * beatsPerSample; // free origin already advanced
         clockLeader.process (running, beat, beatsPerSample, numSamples, [&] (int offset, uint8_t status)
-                             { midi.addEvent (juce::MidiMessage (status), offset); });
+        {
+            if (numLinkEvents < (int) linkEvents.size())
+                linkEvents[(size_t) numLinkEvents++] = { offset, { status, 0, 0 }, 1 };
+        });
+
+        // The port is played one block later than the audio is computed (about when it is heard).
+        const auto blockMs = juce::Time::getMillisecondCounterHiRes() + numSamples * 1000.0 / hostSampleRate;
+
+        for (int i = 0; i < numLinkEvents; ++i)
+        {
+            const auto& e = linkEvents[(size_t) i];
+            midi.addEvent (e.data, e.size, e.offset);
+            linkPortOut.push (e.data, e.size, blockMs + e.offset * 1000.0 / hostSampleRate);
+        }
+
+        numLinkEvents = 0;
     }
 
     blockStartTime += numSamples;
@@ -1504,6 +1536,20 @@ void NeuroMPCProcessor::cancelAi (bool wait)
         aiThread.join();
 }
 
+void NeuroMPCProcessor::updateLinkPort()
+{
+    const auto want = linkPortParam->load() > 0.5f;
+
+    if (want && ! linkPortOut.opened() && ! linkPortFailed)
+        linkPortFailed = ! linkPortOut.open(); // don't retry every tick if the system refuses
+    else if (! want)
+    {
+        linkPortFailed = false;
+        if (linkPortOut.opened())
+            linkPortOut.close();
+    }
+}
+
 int NeuroMPCProcessor::teachDrumRange (int component, int64_t start, int64_t end)
 {
     const std::scoped_lock lock (modelLock);
@@ -2093,6 +2139,8 @@ juce::ValueTree NeuroMPCProcessor::createStateTree() const
             lt.setProperty ("note", lane.note, nullptr);
             lt.setProperty ("length", lane.length, nullptr);
             lt.setProperty ("mute", lane.mute, nullptr);
+            lt.setProperty ("output", lane.output, nullptr);
+            lt.setProperty ("channel", lane.midiChannel, nullptr);
             lt.setProperty ("name", juce::String (lane.name), nullptr);
             lt.setProperty ("class", lane.drumClass, nullptr);
 
@@ -2230,6 +2278,8 @@ bool NeuroMPCProcessor::applyStateTree (juce::ValueTree root)
                 lane.note = juce::jlimit (0, 127, (int) lt.getProperty ("note", 36));
                 lane.length = juce::jlimit (1, neuro::SeqLane::maxSteps, (int) lt.getProperty ("length", 16));
                 lane.mute = lt.getProperty ("mute", false);
+                lane.output = juce::jlimit (0, 2, (int) lt.getProperty ("output", 0));
+                lane.midiChannel = juce::jlimit (1, 16, (int) lt.getProperty ("channel", 1));
                 lane.name = lt.getProperty ("name", "").toString().toStdString();
                 lane.drumClass = juce::jlimit (-1, neuro::numDrumClasses - 1, (int) lt.getProperty ("class", -1));
 

@@ -13,6 +13,7 @@
 #include "Core/Sequencer.h"
 #include "DSP/Analysis.h"
 #include "DSP/BackgroundWorker.h"
+#include "Audio/MidiLinkPort.h"
 
 namespace ParamIDs
 {
@@ -70,6 +71,7 @@ namespace ParamIDs
     inline constexpr auto chordSplit   = "chordSplit";
     inline constexpr auto clockIn      = "midiClockIn";
     inline constexpr auto clockOut     = "midiClockOut";
+    inline constexpr auto linkPort     = "midiLinkPort";
     // Per drum-class level, in DrumClass order.
     inline constexpr const char* classLevel[] { "levelKick", "levelSnare", "levelClosedHat", "levelOpenHat", "levelTom1", "levelTom2",
                                                 "levelFloorTom", "levelCrash", "levelRide", "levelPerc", "levelTonal" };
@@ -235,6 +237,8 @@ public:
     void stopAudition (int tag);
 
     void processBackgroundResults();            // also driven by the internal timer, so it works with the editor closed
+    void updateLinkPort();                      // opens/closes the "NEURO MPC" virtual MIDI port to follow its parameter
+    juce::String getLinkPortName() const { return linkPortOut.getName(); }
     bool waitForBackgroundWork (int timeoutMs); // for tests and offline use
 
     juce::AudioFormatManager formats;
@@ -254,7 +258,7 @@ private:
     void updateArpSettings (double bpm);
     void publishMidiRouting();
     bool handleMappedMidi (const juce::MidiMessage&); // audio thread; true = consumed
-    void timerCallback() override { processBackgroundResults(); }
+    void timerCallback() override { processBackgroundResults(); updateLinkPort(); }
 
     std::shared_ptr<const neuro::SampleData> sample;
     neuro::SliceSet slices;
@@ -320,7 +324,12 @@ private:
     int chordKeysDown = 0;
     std::vector<neuro::StretchKey> chordRequested;
     std::atomic<float> *chordLockParam = nullptr, *chordInputParam = nullptr, *chordSplitParam = nullptr;
-    std::atomic<float> *clockInParam = nullptr, *clockOutParam = nullptr;
+    std::atomic<float> *clockInParam = nullptr, *clockOutParam = nullptr, *linkPortParam = nullptr;
+    neuro::MidiLinkPort linkPortOut;
+    bool linkPortFailed = false;
+    struct LinkEvent { int offset; uint8_t data[3]; int size; };
+    std::array<LinkEvent, 512> linkEvents {}; // this block's MIDI out (sequencer MIDI lanes + clock), audio thread
+    int numLinkEvents = 0;
     neuro::MidiClockFollower clockFollower;
     neuro::MidiClockLeader clockLeader;
     int64_t blockStartTime = 0;            // absolute sample time (audio thread)

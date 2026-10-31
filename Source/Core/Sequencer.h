@@ -63,9 +63,22 @@ struct SeqLane
     int drumClass = -1;        // kit piece this lane represents (timbre targets stay within it); -1 = any
     int length = 16;           // steps; lanes may differ (polymeter)
     bool mute = false;
+    int output = 0;            // 0 = sampler, 1 = MIDI out, 2 = both (MIDI out: plugin MIDI output + "NEURO MPC" port)
+    int midiChannel = 1;       // 1..16, for MIDI out (e.g. GW-1)
     std::string name;
     std::array<SeqStep, maxSteps> steps {};
 };
+
+// A lane's note with its destination, as one int (the note tracker and the sink carry it unchanged, so note-offs go
+// where their note-ons went). Sampler-only lanes keep the plain note.
+inline int routedNote (const SeqLane& lane) noexcept
+{
+    return lane.output == 0 ? lane.note
+                            : (lane.note & 0x7f) | (std::clamp (lane.output, 1, 2) << 8) | ((std::clamp (lane.midiChannel, 1, 16) - 1) << 10);
+}
+
+struct NoteRoute { int note, output, channel; };
+inline NoteRoute decodeRoutedNote (int key) noexcept { return { key & 0xff, (key >> 8) & 3, ((key >> 10) & 15) + 1 }; }
 
 struct SeqPattern
 {
@@ -193,7 +206,7 @@ public:
 
                     const auto offset = std::clamp (from + (int) std::llround ((hit - beatAtFrom) / beatsPerSample), from, to - 1);
                     const auto gateSamples = (int64_t) std::llround (std::clamp (step.gate, 0.05f, 1.0f) * s / ratchet / beatsPerSample);
-                    hits[(size_t) numHits++] = { offset, lane.note, velocity, pitch, gateSamples,
+                    hits[(size_t) numHits++] = { offset, routedNote (lane), velocity, pitch, gateSamples,
                                                  { step.sliceId, step.timbreX, step.timbreY, lane.drumClass } };
                 }
             }

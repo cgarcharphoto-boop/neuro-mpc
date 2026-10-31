@@ -1,4 +1,5 @@
 // Headless integration tests: drive the real NeuroMPCProcessor with files, MIDI and state.
+#include <CoreFoundation/CoreFoundation.h> // run loop pumping: CoreMIDI device notifications
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
 #include "Core/TransientDetector.h"
@@ -824,7 +825,7 @@ int main()
             "arpPhrase", "arpVariation", "arpVaryPitch", "arpVaryVelocity", "arpVaryRhythm", "arpReturn", "arpHumanTime",
             "arpHumanVelocity", "seqMode", "seqPattern", "seqRate", "seqSwing", "seqFill", "weaveAccent", "weaveAccentAmount",
             "weaveFill", "weaveFillEvery", "weavePitch", "padBank", "padBankFollow", "padChannel", "levelKick", "levelSnare",
-            "levelClosedHat", "levelOpenHat", "levelTom1", "levelTom2", "levelFloorTom", "levelCrash", "levelRide", "levelPerc", "levelTonal", "chordLock", "chordInput", "chordSplit", "midiClockIn", "midiClockOut" };
+            "levelClosedHat", "levelOpenHat", "levelTom1", "levelTom2", "levelFloorTom", "levelCrash", "levelRide", "levelPerc", "levelTonal", "chordLock", "chordInput", "chordSplit", "midiClockIn", "midiClockOut", "midiLinkPort" };
         NeuroMPCProcessor a;
         juce::StringArray ids;
         for (auto* param : a.getParameters())
@@ -1064,6 +1065,85 @@ int main()
             hs.processBlock (buf, midi);
             CHECK (midi.getNumEvents() == 1 && midi.begin().operator*().data[0] == 0xfc); // Stop
             setParam (hs, ParamIDs::clockOut, 0.0f);
+        }
+
+        // Lanes to MIDI out (e.g. GW-1): MIDI-only lanes are silent in the sampler and send note on/off on their channel
+        // at the step's exact sample; "both" lanes do both. Then the same through the real "NEURO MPC" virtual port.
+        {
+            auto runFree = [&] (int blocks, std::vector<std::pair<int64_t, juce::MidiMessage>>* out, std::vector<float>* audio, bool realTime)
+            {
+                setParam (hs, ParamIDs::seqMode, 0.0f);
+                render (hs, 1);
+                setParam (hs, ParamIDs::seqMode, 2.0f);
+                juce::AudioBuffer<float> buf (2, block);
+                for (int blk = 0; blk < blocks; ++blk)
+                {
+                    juce::MidiBuffer midi;
+                    hs.processBlock (buf, midi);
+                    if (out != nullptr) for (const auto meta : midi) out->push_back ({ (int64_t) blk * block + meta.samplePosition, meta.getMessage() });
+                    if (audio != nullptr) audio->insert (audio->end(), buf.getReadPointer (0), buf.getReadPointer (0) + block);
+                    if (realTime) juce::Thread::sleep ((int) (block * 1000.0 / rate));
+                }
+                setParam (hs, ParamIDs::seqMode, 0.0f);
+                render (hs, 1);
+            };
+
+            hs.editSeqPattern (0, [] (auto& pat) { pat.lanes[0].output = 1; pat.lanes[0].midiChannel = 2; });
+            std::vector<std::pair<int64_t, juce::MidiMessage>> sent;
+            std::vector<float> audio;
+            runFree (100, &sent, &audio, false);
+            std::vector<int64_t> ons;
+            int offs = 0;
+            for (auto& [when, msg] : sent) { if (msg.isNoteOn() && msg.getChannel() == 2 && msg.getNoteNumber() == 36) ons.push_back (when); offs += msg.isNoteOff() && msg.getChannel() == 2; }
+            std::printf ("  lane -> MIDI ch 2: note-ons at %lld %lld %lld, %d note-offs, sampler peak %.3f\n", ons.size() > 0 ? (long long) ons[0] : -1LL,
+                         ons.size() > 1 ? (long long) ons[1] : -1LL, ons.size() > 2 ? (long long) ons[2] : -1LL, offs,
+                         audio.empty() ? 0.0f : *std::max_element (audio.begin(), audio.end()));
+            CHECK (ons.size() == 3 && ons[0] == 0 && ons[1] == 24000 && ons[2] == 48000 && offs >= 2);
+            CHECK (std::all_of (audio.begin(), audio.end(), [] (float v) { return v == 0.0f; }));
+
+            hs.editSeqPattern (0, [] (auto& pat) { pat.lanes[0].output = 2; });
+            sent.clear(); audio.clear();
+            runFree (100, &sent, &audio, false);
+            CHECK (! sent.empty() && onsets (audio).size() == 3); // both
+
+            // Real virtual port, received by a separate MIDI input (as GW-1 / KAOSS NEXUS would). Needs a live CoreMIDI
+            // server: skipped on CI runners.
+            if (std::getenv ("CI") != nullptr)
+                std::printf ("  'NEURO MPC' port: skipped on CI (no CoreMIDI session)\n");
+            else
+            {
+            struct Receiver : juce::MidiInputCallback
+            {
+                std::atomic<int> notes { 0 }, ticks { 0 };
+                void handleIncomingMidiMessage (juce::MidiInput*, const juce::MidiMessage& m) override { notes += m.isNoteOn(); ticks += m.isMidiClock(); }
+            } receiver;
+            setParam (hs, ParamIDs::linkPort, 1.0f);
+            setParam (hs, ParamIDs::clockOut, 1.0f);
+            hs.updateLinkPort();
+            std::unique_ptr<juce::MidiInput> input;
+            for (int attempt = 0; attempt < 20 && input == nullptr; ++attempt) // CoreMIDI publishes new sources asynchronously
+            {
+                CFRunLoopRunInMode (kCFRunLoopDefaultMode, 0.05, false);
+                for (const auto& d : juce::MidiInput::getAvailableDevices())
+                    if (d.name == hs.getLinkPortName()) input = juce::MidiInput::openDevice (d.identifier, &receiver);
+            }
+            for (const auto& d : juce::MidiInput::getAvailableDevices())
+                if (d.name == hs.getLinkPortName()) input = juce::MidiInput::openDevice (d.identifier, &receiver);
+            CHECK (input != nullptr);
+            if (input != nullptr)
+            {
+                input->start();
+                runFree (100, nullptr, nullptr, true); // ~1.07 s in real time: 3 quarter notes, ~51 ticks
+                juce::Thread::sleep (100);
+                input->stop();
+            }
+            std::printf ("  'NEURO MPC' port -> MIDI input: %d note-ons, %d clock ticks\n", receiver.notes.load(), receiver.ticks.load());
+            CHECK (receiver.notes == 3 && receiver.ticks >= 45);
+            setParam (hs, ParamIDs::linkPort, 0.0f);
+            setParam (hs, ParamIDs::clockOut, 0.0f);
+            hs.updateLinkPort();
+            }
+            hs.editSeqPattern (0, [] (auto& pat) { pat.lanes[0].output = 0; });
         }
     }
 
