@@ -3,6 +3,7 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <juce_audio_formats/juce_audio_formats.h>
 #include "Audio/VoiceEngine.h"
+#include "AI/DrumExtractor.h"
 #include "Core/DrumNMF.h"
 #include "Core/Arpeggiator.h"
 #include "Core/MidiMap.h"
@@ -160,6 +161,20 @@ public:
     int teachDrumRange (int component, int64_t start, int64_t end);
     void clearTaughtDrums();
     std::array<int, neuro::nmf::numDrumComponents> getTaughtCounts() const;
+
+    // Extract drums (AI, Demucs): pulls the drum stem out of a full song on a worker thread, then (message thread)
+    // writes "<name> (drums).wav" and loads it, ready for Separate drums. The model (84 MB, MIT) is downloaded on request.
+    enum class AiState { idle, downloading, extracting, ready, failed };
+    static juce::File getDrumModelFile();
+    static bool isDrumModelInstalled() { return getDrumModelFile().existsAsFile(); }
+    void downloadDrumModel();                   // async; progress via getAiState/getAiProgress
+    bool startExtractDrums();                   // async; false if busy, no sample or no model
+    juce::File finishExtractDrums();            // message thread, after AiState::ready: writes + loads the stem
+    juce::File extractDrumsBlocking (juce::String& error); // tests and offline use
+    void cancelAi();
+    AiState getAiState() const noexcept { return (AiState) aiState.load(); }
+    float getAiProgress() const noexcept { return aiProgress.load(); }
+    juce::String getAiMessage() const;
 
     // Converts exact-slice steps into timbre-map points, so the pattern re-orchestrates itself on any kit.
     int retargetPatternToTimbre (int patternIndex);
@@ -354,6 +369,27 @@ private:
     static constexpr int sliceAuditionTag = 1000; // note tags above the MIDI range
 
     mutable std::recursive_mutex modelLock;
+
+    struct ModelDownloadListener : juce::URL::DownloadTaskListener
+    {
+        explicit ModelDownloadListener (NeuroMPCProcessor& p) : owner (p) {}
+        void finished (juce::URL::DownloadTask*, bool success) override;
+        void progress (juce::URL::DownloadTask*, juce::int64 done, juce::int64 total) override;
+        NeuroMPCProcessor& owner;
+    };
+
+    std::atomic<int> aiState { 0 };
+    std::atomic<float> aiProgress { 0.0f };
+    mutable std::mutex aiMutex;                 // aiMessage, aiResult, aiSource
+    juce::String aiMessage;
+    juce::AudioBuffer<float> aiResult;
+    std::shared_ptr<const neuro::SampleData> aiSource;
+    neuro::demucs::Job aiJob;
+    std::thread aiThread;
+    ModelDownloadListener modelListener { *this };
+    std::unique_ptr<juce::URL::DownloadTask> modelDownload;
+    void setAiState (AiState, const juce::String& message = {});
+    bool computeDrums (const neuro::SampleData&, juce::AudioBuffer<float>& out, juce::String& error);
     std::vector<neuro::nmf::Example> taughtDrums; // guarded by modelLock
     juce::File taughtFile;
     juce::ValueTree pendingSliceTree; // slices of a missing sample, applied on relink

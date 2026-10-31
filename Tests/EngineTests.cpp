@@ -1388,6 +1388,65 @@ int main()
         CHECK (sp.loadSample (mixFile, error) && sp.getTaughtCounts()[0] == 1); // back on the mix: still taught
         sp.clearTaughtDrums();
         CHECK (sp.getTaughtCounts()[0] == 0);
+
+        // Extract drums (AI): drums + bass line + chords -> the drum stem is much closer to the drums than the mix is.
+        // Needs the downloaded model (not in CI): skipped without it.
+        if (NeuroMPCProcessor::isDrumModelInstalled())
+        {
+            // Real drums when available (Apple Drummer loop, first 8 s), else the synthetic bar; plus bass line and chords.
+            juce::AudioBuffer<float> drumsOnly (1, mix.getNumSamples() * 2);
+            for (int i = 0; i < drumsOnly.getNumSamples(); ++i) drumsOnly.setSample (0, i, mix.getSample (0, i % mix.getNumSamples()));
+            const juce::File realLoop ("/Library/Audio/Apple Loops/Apple/13 Drummer/Rose - Slow Dancing.caf");
+            auto songRate = rate;
+            if (std::unique_ptr<juce::AudioFormatReader> reader (sp.formats.createReaderFor (realLoop)); reader != nullptr)
+            {
+                songRate = reader->sampleRate;
+                drumsOnly.setSize (1, (int) (8 * songRate));
+                reader->read (&drumsOnly, 0, drumsOnly.getNumSamples(), 0, true, false);
+            }
+            juce::AudioBuffer<float> song (1, drumsOnly.getNumSamples());
+            for (int i = 0; i < song.getNumSamples(); ++i)
+            {
+                const auto t = (float) (i / songRate);
+                const auto bass = 0.3f * std::sin (6.2831853f * (i % (int) (4 * songRate) < 2 * songRate ? 55.0f : 73.4f) * t);
+                const auto chord = 0.06f * (std::sin (6.2831853f * 261.6f * t) + std::sin (6.2831853f * 329.6f * t) + std::sin (6.2831853f * 392.0f * t));
+                song.setSample (0, i, drumsOnly.getSample (0, i) + bass + chord);
+            }
+            {
+                juce::WavAudioFormat wav;
+                mixFile.deleteFile();
+                std::unique_ptr<juce::OutputStream> out (mixFile.createOutputStream().release());
+                if (auto writer = wav.createWriterFor (out, juce::AudioFormatWriterOptions().withSampleRate (songRate).withNumChannels (1).withBitsPerSample (24)))
+                    writer->writeFromAudioSampleBuffer (song, 0, song.getNumSamples());
+            }
+            CHECK (sp.loadSample (mixFile, error));
+            const auto t0 = juce::Time::getMillisecondCounterHiRes();
+            juce::String aiError;
+            const auto stem = sp.extractDrumsBlocking (aiError);
+            const auto seconds = (juce::Time::getMillisecondCounterHiRes() - t0) / 1000.0;
+            auto sdr = [&] (const juce::AudioBuffer<float>& estimate)
+            {
+                double errSum = 0.0, refSum = 0.0;
+                for (int i = 0; i < drumsOnly.getNumSamples(); ++i)
+                {
+                    const auto diff = (double) estimate.getSample (0, i) - drumsOnly.getSample (0, i);
+                    errSum += diff * diff;
+                    refSum += (double) drumsOnly.getSample (0, i) * drumsOnly.getSample (0, i);
+                }
+                return 10.0 * std::log10 (refSum / std::max (errSum, 1.0e-20));
+            };
+            CHECK (stem.existsAsFile() && sp.getSample()->length() == song.getNumSamples());
+            const auto mixSdr = sdr (song), stemSdr = stem.existsAsFile() ? sdr (sp.getSample()->buffer) : -100.0;
+            std::printf ("  AI drums: %.1f s for %.1f s of audio; drums SDR: mix %.1f dB -> stem %.1f dB %s\n", seconds,
+                         song.getNumSamples() / songRate, mixSdr, stemSdr, aiError.toRawUTF8());
+            CHECK (stemSdr > mixSdr + 6.0);
+            stem.deleteFile();
+        }
+        else
+        {
+            std::printf ("  AI drums: model not installed, skipped\n");
+        }
+
         mixFile.deleteFile();
         sep.stems.deleteFile();
     }

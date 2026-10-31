@@ -1,4 +1,5 @@
 #include "PluginProcessor.h"
+#include <juce_cryptography/juce_cryptography.h>
 #include "PluginEditor.h"
 #include "Core/Scales.h"
 #include "Core/TransientDetector.h"
@@ -91,6 +92,8 @@ NeuroMPCProcessor::NeuroMPCProcessor()
 NeuroMPCProcessor::~NeuroMPCProcessor()
 {
     stopTimer();
+    cancelAi();
+    modelDownload.reset();
 }
 
 juce::AudioProcessorValueTreeState::ParameterLayout NeuroMPCProcessor::createLayout()
@@ -1203,6 +1206,233 @@ NeuroMPCProcessor::DeconstructSummary NeuroMPCProcessor::deconstructLoop (int pa
     return summary;
 }
 
+static juce::File separatedDirectory()
+{
+    return juce::File::getSpecialLocation (juce::File::userMusicDirectory).getChildFile ("NEURO MPC/Separated");
+}
+
+static bool writeWav24 (const juce::File& file, const juce::AudioBuffer<float>& buffer, double sampleRate)
+{
+    file.getParentDirectory().createDirectory();
+    file.deleteFile();
+    juce::WavAudioFormat wav;
+    std::unique_ptr<juce::OutputStream> out (file.createOutputStream().release());
+    auto options = juce::AudioFormatWriterOptions().withSampleRate (sampleRate).withNumChannels (buffer.getNumChannels()).withBitsPerSample (24);
+    auto writer = wav.createWriterFor (out, options);
+    return writer != nullptr && writer->writeFromAudioSampleBuffer (buffer, 0, buffer.getNumSamples());
+}
+
+// ---- Extract drums (AI) ----
+namespace
+{
+    // htdemucs fine-tuned drums model, converted for demucs.cpp (MIT, Meta weights). Pinned by SHA-256.
+    const char* const drumModelUrl = "https://huggingface.co/datasets/Retrobear/demucs.cpp/resolve/8f58ac0491bbea657275bcd3e38af1ab3a27bfc9/ggml-model-htdemucs_ft_drums-4s-f16.bin";
+    const char* const drumModelSha256 = "cda268755cc80deb5f4616a99f9d09f26bc5ce3882aa35e0bc504708a12604bb";
+
+    // Planar resampling with a windowed-sinc interpolator (input zero-padded so the tail is complete).
+    juce::AudioBuffer<float> resample (const juce::AudioBuffer<float>& in, int numIn, double fromRate, double toRate, int numOut)
+    {
+        juce::AudioBuffer<float> out (in.getNumChannels(), numOut);
+
+        for (int c = 0; c < in.getNumChannels(); ++c)
+        {
+            if (std::abs (fromRate - toRate) < 0.5)
+            {
+                out.clear (c, 0, numOut);
+                out.copyFrom (c, 0, in, c, 0, juce::jmin (numIn, numOut));
+                continue;
+            }
+
+            std::vector<float> padded ((size_t) numIn + 256, 0.0f);
+            std::copy (in.getReadPointer (c), in.getReadPointer (c) + numIn, padded.begin());
+            juce::WindowedSincInterpolator interpolator;
+            interpolator.process (fromRate / toRate, padded.data(), out.getWritePointer (c), numOut);
+        }
+
+        return out;
+    }
+}
+
+juce::File NeuroMPCProcessor::getDrumModelFile()
+{
+    return juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory)
+        .getChildFile ("Application Support/NEURO MPC/Models/ggml-model-htdemucs_ft_drums-4s-f16.bin");
+}
+
+void NeuroMPCProcessor::setAiState (AiState state, const juce::String& message)
+{
+    {
+        const std::scoped_lock lock (aiMutex);
+        aiMessage = message;
+    }
+
+    aiState = (int) state;
+}
+
+juce::String NeuroMPCProcessor::getAiMessage() const
+{
+    const std::scoped_lock lock (aiMutex);
+    return aiMessage;
+}
+
+void NeuroMPCProcessor::downloadDrumModel()
+{
+    if (getAiState() == AiState::downloading || getAiState() == AiState::extracting)
+        return;
+
+    const auto part = getDrumModelFile().withFileExtension ("part");
+    part.getParentDirectory().createDirectory();
+    part.deleteFile();
+    aiProgress = 0.0f;
+    setAiState (AiState::downloading, "Downloading the AI drum model (84 MB)...");
+    modelDownload = juce::URL (drumModelUrl).downloadToFile (part, juce::URL::DownloadTaskOptions().withListener (&modelListener));
+
+    if (modelDownload == nullptr)
+        setAiState (AiState::failed, "Could not start the model download");
+}
+
+void NeuroMPCProcessor::ModelDownloadListener::progress (juce::URL::DownloadTask*, juce::int64 done, juce::int64 total)
+{
+    owner.aiProgress = total > 0 ? (float) done / (float) total : 0.0f;
+}
+
+void NeuroMPCProcessor::ModelDownloadListener::finished (juce::URL::DownloadTask* task, bool success)
+{
+    const auto part = getDrumModelFile().withFileExtension ("part");
+
+    // Only a byte-exact model is installed: anything else (error page, truncated file) is discarded.
+    if (success && task->statusCode() == 200 && juce::SHA256 (part).toHexString() == drumModelSha256 && part.moveFileTo (getDrumModelFile()))
+    {
+        owner.setAiState (AiState::idle, "AI drum model installed");
+        return;
+    }
+
+    part.deleteFile();
+    owner.setAiState (AiState::failed, "Model download failed (network or checksum). Try again.");
+}
+
+bool NeuroMPCProcessor::computeDrums (const neuro::SampleData& source, juce::AudioBuffer<float>& out, juce::String& error)
+{
+    const auto n = (int) source.length();
+    const auto sr = source.sampleRate;
+    juce::AudioBuffer<float> stereo (2, n);
+    stereo.copyFrom (0, 0, source.buffer, 0, 0, n);
+    stereo.copyFrom (1, 0, source.buffer, juce::jmin (1, source.buffer.getNumChannels() - 1), 0, n);
+
+    const auto modelLength = (int) std::ceil ((double) n * neuro::demucs::sampleRate / sr);
+    const auto in = resample (stereo, n, sr, neuro::demucs::sampleRate, modelLength);
+    std::vector<float> left, right;
+    std::string message;
+
+    if (! neuro::demucs::extractDrums (getDrumModelFile().getFullPathName().toStdString(), in.getReadPointer (0), in.getReadPointer (1),
+                                       modelLength, left, right, aiJob, message))
+    {
+        error = message;
+        return false;
+    }
+
+    juce::AudioBuffer<float> drums (2, modelLength);
+    drums.copyFrom (0, 0, left.data(), modelLength);
+    drums.copyFrom (1, 0, right.data(), modelLength);
+    out = resample (drums, modelLength, neuro::demucs::sampleRate, sr, n);
+    return true;
+}
+
+bool NeuroMPCProcessor::startExtractDrums()
+{
+    const auto state = getAiState();
+
+    if (state == AiState::downloading || state == AiState::extracting || ! isDrumModelInstalled())
+        return false;
+
+    std::shared_ptr<const neuro::SampleData> source;
+    {
+        const std::scoped_lock lock (modelLock);
+        source = sample;
+    }
+
+    if (source == nullptr || source->length() < 4096)
+        return false;
+
+    if (aiThread.joinable())
+        aiThread.join();
+
+    aiJob.cancel = false;
+    aiJob.progress = 0.0f;
+    aiProgress = 0.0f;
+    setAiState (AiState::extracting, "Extracting drums (AI)...");
+
+    aiThread = std::thread ([this, source]
+    {
+        juce::AudioBuffer<float> drums;
+        juce::String error;
+        const auto ok = computeDrums (*source, drums, error);
+
+        {
+            const std::scoped_lock lock (aiMutex);
+            aiResult = std::move (drums);
+            aiSource = source;
+        }
+
+        setAiState (ok ? AiState::ready : AiState::failed, ok ? juce::String ("Drums extracted") : error);
+    });
+
+    return true;
+}
+
+juce::File NeuroMPCProcessor::finishExtractDrums()
+{
+    if (getAiState() != AiState::ready)
+        return {};
+
+    juce::AudioBuffer<float> drums;
+    std::shared_ptr<const neuro::SampleData> source;
+    {
+        const std::scoped_lock lock (aiMutex);
+        drums = std::move (aiResult);
+        source = std::move (aiSource);
+    }
+
+    const auto file = separatedDirectory().getChildFile (source->file.getFileNameWithoutExtension() + " (drums).wav");
+    juce::String error;
+
+    if (! writeWav24 (file, drums, source->sampleRate) || ! loadSample (file, error))
+    {
+        setAiState (AiState::failed, "Could not write or load " + file.getFileName());
+        return {};
+    }
+
+    setAiState (AiState::idle, "Drums extracted: " + file.getFileName());
+    return file;
+}
+
+juce::File NeuroMPCProcessor::extractDrumsBlocking (juce::String& error)
+{
+    if (! startExtractDrums())
+    {
+        error = isDrumModelInstalled() ? "No sample loaded, or busy" : "AI drum model not installed";
+        return {};
+    }
+
+    aiThread.join();
+
+    if (getAiState() != AiState::ready)
+    {
+        error = getAiMessage();
+        return {};
+    }
+
+    return finishExtractDrums();
+}
+
+void NeuroMPCProcessor::cancelAi()
+{
+    aiJob.cancel = true;
+
+    if (aiThread.joinable())
+        aiThread.join();
+}
+
 int NeuroMPCProcessor::teachDrumRange (int component, int64_t start, int64_t end)
 {
     const std::scoped_lock lock (modelLock);
@@ -1275,20 +1505,10 @@ NeuroMPCProcessor::DeconstructSummary NeuroMPCProcessor::separateDrums (int patt
         for (int c = 0; c < numChannels; ++c)
             stems.copyFrom (c, (int) (s * length), result.stems[(size_t) s][(size_t) c].data(), (int) length);
 
-    const auto dir = juce::File::getSpecialLocation (juce::File::userMusicDirectory).getChildFile ("NEURO MPC/Separated");
-    dir.createDirectory();
-    const auto file = dir.getChildFile (original->file.getFileNameWithoutExtension() + " (drum stems).wav");
-    file.deleteFile();
+    const auto file = separatedDirectory().getChildFile (original->file.getFileNameWithoutExtension() + " (drum stems).wav");
 
-    {
-        juce::WavAudioFormat wav;
-        std::unique_ptr<juce::OutputStream> out (file.createOutputStream().release());
-        auto options = juce::AudioFormatWriterOptions().withSampleRate (sr).withNumChannels (numChannels).withBitsPerSample (24);
-        auto writer = wav.createWriterFor (out, options);
-
-        if (writer == nullptr || ! writer->writeFromAudioSampleBuffer (stems, 0, stems.getNumSamples()))
-            return summary;
-    }
+    if (! writeWav24 (file, stems, sr))
+        return summary;
 
     juce::String error;
 

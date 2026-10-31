@@ -23,6 +23,24 @@ add_subdirectory("${JUCE_PATH}" JUCE)
 add_subdirectory(ThirdParty/signalsmith-linear SYSTEM)
 add_subdirectory(ThirdParty/signalsmith-stretch SYSTEM)
 
+# AI drum extraction: demucs.cpp (MIT, f1206e9, vendored in ThirdParty/demucs.cpp) on Eigen (MPL-2.0, dd8c71e, header-only,
+# fetched). Built as its own optimised library, third-party warnings off; Source/AI/DrumExtractor.h is the Eigen-free API.
+include(FetchContent)
+FetchContent_Declare(eigen
+    URL https://gitlab.com/libeigen/eigen/-/archive/dd8c71e62852b2fe429edb6682ac91fd1c578a26/eigen-dd8c71e62852b2fe429edb6682ac91fd1c578a26.tar.gz
+    URL_HASH SHA256=e8cbc003b1fa5e0d0d142c58155aaf341f87783d213d31a605a19b2f13d27acc
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
+FetchContent_GetProperties(eigen)
+if(NOT eigen_POPULATED)
+    FetchContent_Populate(eigen) # headers only: no add_subdirectory (Eigen's own tests/targets are not needed)
+endif()
+file(GLOB DEMUCS_SOURCES ThirdParty/demucs.cpp/src/*.cpp)
+add_library(neuro_demucs STATIC ${DEMUCS_SOURCES} Source/AI/DrumExtractor.cpp)
+target_include_directories(neuro_demucs SYSTEM PRIVATE ThirdParty/demucs.cpp/src ${eigen_SOURCE_DIR})
+target_compile_definitions(neuro_demucs PRIVATE NDEBUG EIGEN_NO_DEBUG)
+target_compile_options(neuro_demucs PRIVATE -w -O3 -ffp-contract=fast)
+set_target_properties(neuro_demucs PROPERTIES XCODE_ATTRIBUTE_GCC_OPTIMIZATION_LEVEL 3) # also optimised in Debug: Eigen is unusable at -O0
+
 juce_add_plugin(NEURO_MPC
     COMPANY_NAME "NEURO MPC"
     BUNDLE_ID "org.neurompc.neurompc"
@@ -58,6 +76,8 @@ target_link_libraries(NEURO_MPC
         juce::juce_audio_processors
         juce::juce_dsp
         signalsmith-stretch
+        neuro_demucs
+        juce::juce_cryptography
     PUBLIC
         juce::juce_recommended_config_flags
         juce::juce_recommended_lto_flags
@@ -89,6 +109,8 @@ target_link_libraries(neuro_engine_tests PRIVATE
     juce::juce_audio_processors
     juce::juce_dsp
     signalsmith-stretch
+    neuro_demucs
+    juce::juce_cryptography
     juce::juce_recommended_config_flags
     juce::juce_recommended_warning_flags)
 add_test(NAME engine COMMAND neuro_engine_tests)
@@ -114,4 +136,6 @@ target_link_libraries(neuro_field_test PRIVATE
     juce::juce_audio_processors
     juce::juce_dsp
     signalsmith-stretch
+    neuro_demucs
+    juce::juce_cryptography
     juce::juce_recommended_config_flags)

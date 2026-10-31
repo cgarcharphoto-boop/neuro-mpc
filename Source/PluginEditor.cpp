@@ -269,6 +269,23 @@ NeuroMPCEditor::NeuroMPCEditor (NeuroMPCProcessor& p) : AudioProcessorEditor (p)
     teachClear.setTooltip ("Forget the taught examples (Separate drums uses its generic drum sounds)");
     teachClear.onClick = [this, taughtText] { proc.clearTaughtDrums(); kitInfo.setText (taughtText(), juce::dontSendNotification); };
 
+    extractAiButton.setTooltip ("AI (Demucs): pull the drums out of a full song, then Separate drums on them. "
+                                "First use downloads the model (84 MB). Click again to cancel.");
+    extractAiButton.onClick = [this]
+    {
+        using S = NeuroMPCProcessor::AiState;
+        const auto state = proc.getAiState();
+
+        if (state == S::extracting)
+            proc.cancelAi();
+        else if (state == S::downloading)
+            return;
+        else if (! NeuroMPCProcessor::isDrumModelInstalled())
+            proc.downloadDrumModel();
+        else if (! proc.startExtractDrums())
+            kitInfo.setText ("Load a song or loop first", juce::dontSendNotification);
+    };
+
     retargetButton.setTooltip ("Turn exact-slice steps into timbre points: the pattern then re-orchestrates itself on any kit");
     retargetButton.onClick = [this]
     {
@@ -1095,7 +1112,7 @@ void NeuroMPCEditor::registerMappables()
              { &mutSeed, "evolve.seed" }, { &kitTab, "view.kit" }, { &sliceClass, "kit.sliceClass" }, { &laneClass, "kit.laneClass" },
              { &hitSensitivity, "kit.hitSensitivity" }, { &deconstructButton, "kit.deconstruct" }, { &separateButton, "kit.separate" }, { &retargetButton, "kit.retarget" },
              { &stepToSlice, "kit.stepToSlice" }, { &stepToTimbre, "kit.stepToTimbre" }, { &stepToPad, "kit.stepToPad" },
-             { &teachKick, "kit.teachKick" }, { &teachSnare, "kit.teachSnare" }, { &teachHat, "kit.teachHat" }, { &teachClear, "kit.teachClear" } })
+             { &extractAiButton, "kit.extractAi" }, { &teachKick, "kit.teachKick" }, { &teachSnare, "kit.teachSnare" }, { &teachHat, "kit.teachHat" }, { &teachClear, "kit.teachClear" } })
         id (*c, name);
 
     for (int pc = 0; pc < 12; ++pc)
@@ -1493,7 +1510,7 @@ std::vector<juce::Component*> NeuroMPCEditor::kitPanelComponents()
 {
     std::vector<juce::Component*> list { &separateButton, &timbreMap, &kitTitle, &kitInfo, &chordInfo, &sliceClass, &laneClass, &chordMode, &chordInput,
                                          &hitSensitivity, &chordSplit, &deconstructButton, &retargetButton, &stepToSlice, &stepToTimbre, &stepToPad,
-                                         &teachKick, &teachSnare, &teachHat, &teachClear };
+                                         &extractAiButton, &teachKick, &teachSnare, &teachHat, &teachClear };
 
     for (auto& k : classLevels)
         list.push_back (&k);
@@ -1826,8 +1843,35 @@ void NeuroMPCEditor::updateSlicePanel()
         targetSeconds.setText (juce::String (original * slice.timeStretchRatio, 3), juce::dontSendNotification);
 }
 
+// AI extraction / model download: button text and status follow the processor; a finished extraction is loaded and
+// separated here (message thread).
+void NeuroMPCEditor::updateAiStatus()
+{
+    using S = NeuroMPCProcessor::AiState;
+    const auto state = proc.getAiState();
+    const auto busy = state == S::downloading || state == S::extracting;
+
+    if (state == S::ready)
+    {
+        if (const auto file = proc.finishExtractDrums(); file.existsAsFile())
+            separateButton.onClick();
+        return;
+    }
+
+    if (busy)
+        kitInfo.setText (proc.getAiMessage() + " " + juce::String (juce::roundToInt (proc.getAiProgress() * 100.0f)) + "%", juce::dontSendNotification);
+    else if ((int) state != shownAiState)
+        kitInfo.setText (proc.getAiMessage(), juce::dontSendNotification);
+
+    extractAiButton.setButtonText (state == S::extracting ? "Cancel AI" : state == S::downloading ? "Downloading..."
+                                   : NeuroMPCProcessor::isDrumModelInstalled() ? "Extract drums (AI)" : "Get AI model");
+    shownAiState = (int) state;
+}
+
 void NeuroMPCEditor::timerCallback()
 {
+    updateAiStatus();
+
     if (shownSampleVersion != proc.getSampleVersion())
     {
         shownSampleVersion = proc.getSampleVersion();
@@ -2231,6 +2275,7 @@ void NeuroMPCEditor::resized()
             b->setBounds (r2.removeFromLeft (110));
             r2.removeFromLeft (6);
         }
+        extractAiButton.setBounds (r2.removeFromLeft (130));
         auto rTeach = row();
         for (auto* b : { &teachKick, &teachSnare, &teachHat, &teachClear })
         {
