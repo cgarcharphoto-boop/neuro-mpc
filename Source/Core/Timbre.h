@@ -40,7 +40,8 @@ struct TimbreFeatures
 
     // 2D timbre map: x = dark (0) .. bright (1), y = tonal (0) .. noisy (1).
     float mapX() const noexcept { return std::clamp ((std::log2 (std::max (centroidHz, 50.0f)) - std::log2 (100.0f)) / (std::log2 (12000.0f) - std::log2 (100.0f)), 0.0f, 1.0f); }
-    float mapY() const noexcept { return std::clamp (std::sqrt (flatness) / 0.75f, 0.0f, 1.0f); }
+    // Log scale: real recordings sit around flatness 1e-3 .. 1e-1, white noise ~0.5.
+    float mapY() const noexcept { return std::clamp ((std::log10 (std::max (flatness, 1.0e-5f)) + 4.0f) / 3.7f, 0.0f, 1.0f); }
 };
 
 namespace detail
@@ -168,6 +169,102 @@ inline TimbreFeatures analyseTimbre (const float* const* channels, int numChanne
         if ((cumulative += power[k]) >= 0.85 * total) { f.rolloffHz = (float) k * binHz; break; }
 
     return f;
+}
+
+// Band-energy rise (dB) at an onset inside a mixed loop: post-onset window vs the window just before it.
+// In a full kit the absolute spectrum is mostly bleed (kick room, hats over everything); what changes at the hit
+// tells which drum was struck.
+struct HitRise
+{
+    float low = 0.0f;     // 35-120 Hz: kick, floor tom
+    float body = 0.0f;    // 150-600 Hz: snare/tom body
+    float snap = 0.0f;    // 1-5 kHz: snare wires, stick
+    float high = 0.0f;    // 6-16 kHz: hats, cymbals
+    float highDecayMs = 0.0f;
+};
+
+inline HitRise analyseHitRise (const float* const* channels, int numChannels, int64_t numSamples, int64_t onset, double sampleRate)
+{
+    constexpr size_t n = 2048; // ~43 ms windows
+    HitRise r;
+
+    auto bandEnergies = [&] (int64_t start, std::array<double, 4>& bands)
+    {
+        std::vector<std::complex<float>> spec (n);
+
+        for (size_t i = 0; i < n; ++i)
+        {
+            const auto idx = start + (int64_t) i;
+            float s = 0.0f;
+            if (idx >= 0 && idx < numSamples)
+                for (int c = 0; c < numChannels; ++c) s += channels[c][idx];
+            spec[i] = s * (0.5f - 0.5f * std::cos (6.2831853f * (float) i / (float) (n - 1)));
+        }
+
+        detail::fft (spec);
+        bands = {};
+        const auto binHz = sampleRate / (double) n;
+
+        for (size_t k = 1; k < n / 2; ++k)
+        {
+            const auto hz = (double) k * binHz;
+            const auto p = (double) std::norm (spec[k]);
+            if (hz >= 35.0 && hz < 120.0)         bands[0] += p;
+            else if (hz >= 150.0 && hz < 600.0)   bands[1] += p;
+            else if (hz >= 1000.0 && hz < 5000.0) bands[2] += p;
+            else if (hz >= 6000.0 && hz < 16000.0) bands[3] += p;
+        }
+    };
+
+    std::array<double, 4> before {}, after {};
+    bandEnergies (onset - (int64_t) n, before);
+    bandEnergies (onset, after);
+    auto rise = [] (double a, double b) { return (float) (10.0 * std::log10 ((a + 1.0e-9) / (b + 1.0e-9))); };
+    r.low = rise (after[0], before[0]);
+    r.body = rise (after[1], before[1]);
+    r.snap = rise (after[2], before[2]);
+    r.high = rise (after[3], before[3]);
+
+    // How long the top band stays within 20 dB of its post-onset level (open hat / crash ring on).
+    std::array<double, 4> later {};
+    const auto peakHigh = after[3];
+
+    for (int64_t t = onset + (int64_t) n; t < std::min<int64_t> (numSamples, onset + (int64_t) (2.0 * sampleRate)); t += (int64_t) n)
+    {
+        bandEnergies (t, later);
+        if (later[3] < peakHigh * 0.01) break;
+        r.highDecayMs = (float) ((double) (t - onset) / sampleRate * 1000.0);
+    }
+
+    return r;
+}
+
+// Classifies a hit inside a mixed drum loop from its band rises (the strongest new energy wins).
+inline DrumClass classifyHit (const HitRise& r, const TimbreFeatures& f)
+{
+    if (std::max ({ r.low, r.body, r.snap, r.high }) < 3.0f)     // nothing clearly new: a ghost note / soft hit
+        return DrumClass::perc;
+
+    // Cymbals: the top band jumps most and clearly more than the snare crack.
+    if (r.high >= r.snap + 3.0f && r.high >= r.low)
+    {
+        if (r.highDecayMs < 150.0f) return DrumClass::closedHat;
+        if (r.highDecayMs < 700.0f) return DrumClass::openHat;
+        return f.flatness > 0.05f ? DrumClass::crash : DrumClass::ride;
+    }
+
+    // Kick: the sub-low jump clearly dominates the crack (a beater click is small next to the boom).
+    if (r.low >= r.snap + 6.0f && r.low >= r.body)
+        return f.lowPeakHz > 105.0f && f.decayMs > 300.0f ? DrumClass::floorTom : DrumClass::kick;
+
+    // Snare: a clear crack (wires / stick), even though the shell and room also lift the lows.
+    if (r.snap >= 4.0f)
+        return DrumClass::snare;
+
+    if (r.body >= 3.0f)                                          // body without crack: a tom
+        return f.lowPeakHz < 160.0f ? DrumClass::tom2 : DrumClass::tom1;
+
+    return r.low >= r.high ? DrumClass::kick : DrumClass::closedHat;
 }
 
 // Rule-based drum classifier on the fingerprint. Heuristic (no trained model): verified on synthetic drums;

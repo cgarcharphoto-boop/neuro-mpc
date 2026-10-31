@@ -11,6 +11,7 @@ struct SampleData
     juce::AudioBuffer<float> buffer;
     double sampleRate = 44100.0;
     juce::File file;
+    double fileTempo = 0.0; // tempo tag from the file's metadata (e.g. Apple Loops), 0 = none
 
     int64_t length() const noexcept { return buffer.getNumSamples(); }
 };

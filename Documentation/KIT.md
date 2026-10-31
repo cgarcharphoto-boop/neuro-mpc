@@ -41,6 +41,17 @@ Combined with the per-class outputs, each kit piece arrives on its own mixer tra
 - **Re-orchestration:** after *Retarget to timbre* and loading a different kit (hat/snare/kick/hat), the kick, snare and hat steps play the matching sounds of the new kit on the right outputs.
 - **Chord-Lock** (A3 tone, chord C–E–G): Resample → G3 (55.00) with length ×2^(2/12); Keep length → G3 (55.03) at the original 96000 samples. A chord containing A leaves it unchanged; a slice classed as a drum is never retuned.
 
+## Field test (`Tests/FieldTest.cpp`, run manually; 2026-10-30)
+**Separate outputs through the real plugin APIs.** The *installed* VST3 and AU were loaded with JUCE's hosting (the APIs Live and Logic use). Both expose 12 named outputs, accept all 24 channels, and take state in their host's format (VST3 `IComponent`, AU ClassInfo). Each kit piece arrived **only** on its own output: Kick 0.665, Snare 0.676, Closed Hat 0.685; Main and the others were silent. *Live and Logic themselves were not driven, so their routing UI is still untested.*
+
+**Real recordings: six Apple Logic "Drummer" loops** (acoustic, full kit, 8 bars):
+- **Tempo** (audio autocorrelation, file tempo tag when present, whole-bar disambiguation): **6/6 correct** (75, 85, 75, 120, 100, 110 BPM).
+- **Grid:** the loop's own 1/16 grid, first 4 bars. Four-on-the-floor kicks and offbeat hats come out on the right steps.
+- **Per-hit classes in a full mix** (band-energy rise at each onset):
+  - *mixed* results. Snares on beats 2/4: Rose 83%, Tyrell 50%, Kyle 50%.
+  - On Mason, Duncan and Gavin, most backbeat snares were read as kicks: the hats already ringing in the 1–5 kHz band mask the snare crack.
+  - Separating drums *inside* a mixed recording is a known hard problem (automatic drum transcription; state of the art uses trained neural networks). Use the per-slice class override, or isolated one-shots, which classify far better.
+
 ## Limitations
 - The classifier is heuristic and tuned on synthetic drums; expect overrides on real kits, e.g. claps/rims vs snares, or toms vs tonal bass hits.
 - Loop length assumes a power-of-two number of beats at the host tempo.

@@ -984,6 +984,11 @@ bool NeuroMPCProcessor::loadSample (const juce::File& file, juce::String& error)
     data->sampleRate = reader->sampleRate;
     data->file = file;
 
+    for (const auto& key : reader->metadataValues.getAllKeys())
+        if (key.containsIgnoreCase ("tempo") || key.containsIgnoreCase ("bpm"))
+            if (const auto tempo = reader->metadataValues[key].getDoubleValue(); tempo >= 40.0 && tempo <= 300.0)
+                data->fileTempo = tempo;
+
     if (! reader->read (&data->buffer, 0, (int) length, 0, true, channels > 1))
     {
         error = "Failed to decode: " + file.getFileName();
@@ -1113,40 +1118,44 @@ NeuroMPCProcessor::DeconstructSummary NeuroMPCProcessor::deconstructLoop (int pa
 
     const auto& buffer = sample->buffer;
     const auto length = sample->length();
-    auto onsets = neuro::detectTransients (buffer.getArrayOfReadPointers(), buffer.getNumChannels(), length, sample->sampleRate, sensitivity);
-    slices.setStarts (onsets);
+    const auto sr = sample->sampleRate;
+    const auto* const* all = buffer.getArrayOfReadPointers();
 
-    // Classify every hit now (the background analysis will confirm the same results later).
+    if (bpm <= 0.0) // auto: the file's tempo tag, else estimated from the audio
+        bpm = sample->fileTempo > 0.0 ? sample->fileTempo : neuro::estimateTempo (all, buffer.getNumChannels(), length, sr);
+
+    summary.bpm = bpm;
+    slices.setStarts (neuro::detectTransients (all, buffer.getNumChannels(), length, sr, sensitivity));
+
+    // Classify every hit in context (band rises at its onset); stored as overrides so the one-shot analysis of
+    // isolated slices does not replace them.
     std::vector<const float*> channels ((size_t) buffer.getNumChannels());
-    float loudest = 1.0e-6f;
     std::vector<float> peaks;
+    float loudest = 1.0e-6f;
 
-    for (const auto& s : slices.getSlices())
+    for (int i = 0; i < slices.size(); ++i)
     {
+        const auto s = slices.getSlices()[(size_t) i];
+
         for (int c = 0; c < buffer.getNumChannels(); ++c)
             channels[(size_t) c] = buffer.getReadPointer (c, (int) s.startSample);
 
-        const auto features = neuro::analyseTimbre (channels.data(), (int) channels.size(), s.length(), sample->sampleRate);
-        const auto pitch = neuro::detectPitch (channels.data(), (int) channels.size(), s.length(), sample->sampleRate);
-        const auto pitched = pitch.status == neuro::PitchEstimate::Status::pitched;
-        slices.setAnalysis (s.id, s.startSample, s.endSample, (int) neuro::classify (features, pitched), features.mapX(), features.mapY(),
-                            pitched ? (float) pitch.midi : -1.0f);
+        const auto features = neuro::analyseTimbre (channels.data(), (int) channels.size(), s.length(), sr);
+        const auto rise = neuro::analyseHitRise (all, buffer.getNumChannels(), length, s.startSample, sr);
+        const auto cls = neuro::classifyHit (rise, features);
+        slices.setAnalysis (s.id, s.startSample, s.endSample, (int) cls, features.mapX(), features.mapY(), -1.0f);
+        slices.setDrumClass (i, (int) cls);
         peaks.push_back (buffer.getMagnitude ((int) s.startSample, (int) s.length()));
         loudest = std::max (loudest, peaks.back());
     }
 
     publishSlices();
 
-    // Loop length: the nearest power-of-two number of beats at the given tempo; 1/16 steps (max 64).
-    const auto beats = (double) length / sample->sampleRate * bpm / 60.0;
-    auto loopBeats = 1;
-
-    for (int b : { 2, 4, 8, 16 })
-        if (std::abs (std::log2 (beats / b)) < std::abs (std::log2 (beats / loopBeats)))
-            loopBeats = b;
-
-    const auto steps = std::min (neuro::SeqLane::maxSteps, loopBeats * 4);
-    const auto stepLength = (double) length / steps;
+    // The loop's own 1/16 grid at its tempo; whole bars, at most 4 (64 steps). Later hits are left out.
+    const auto samplesPerStep = sr * 60.0 / bpm / 4.0;
+    const auto totalSteps = (double) length / samplesPerStep;
+    const auto steps = juce::jlimit (1, neuro::SeqLane::maxSteps, totalSteps < 12.0 ? (int) std::lround (totalSteps)       // under a bar: as is
+                                                                                  : (int) std::lround (totalSteps / 16.0) * 16); // else whole bars
 
     neuro::SeqPattern pattern;
     pattern.name = "Deconstructed";
@@ -1164,9 +1173,14 @@ NeuroMPCProcessor::DeconstructSummary NeuroMPCProcessor::deconstructLoop (int pa
     for (size_t i = 0; i < slices.getSlices().size(); ++i)
     {
         const auto& s = slices.getSlices()[i];
+        const auto position = (double) s.startSample / samplesPerStep;
+        const auto step = (int) std::lround (position);
+
+        if (step >= steps)
+            continue;
+
         const auto cls = std::clamp (s.effectiveClass(), 0, neuro::numDrumClasses - 1);
-        const auto step = juce::jlimit (0, steps - 1, (int) std::lround ((double) s.startSample / stepLength));
-        const auto micro = (float) juce::jlimit (-0.5, 0.5, ((double) s.startSample - step * stepLength) / stepLength);
+        const auto micro = (float) juce::jlimit (-0.5, 0.5, position - step);
         const auto velocity = juce::jlimit (0.1f, 1.0f, peaks[i] / loudest);
         auto& st = pattern.lanes[(size_t) cls].steps[(size_t) step];
 

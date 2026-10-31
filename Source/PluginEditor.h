@@ -24,6 +24,7 @@ public:
     std::vector<juce::Component*> getMappableControls() const;
     int countUnmappableControls() const;          // buttons/sliders/selectors without a mapping ID (should be 0)
     void runMappedAction (int uiIndex, float value); // value 0..1 = CC, -1 = note trigger
+    void showTab (int index) { showPanel ((Panel) juce::jlimit (0, (int) Panel::kit, index)); } // 0 slice .. 6 kit (tests, tooling)
 
 private:
     // MPC-style pad (one of 16 visible; the bank selects which 16 of the 64). Velocity from the vertical click position

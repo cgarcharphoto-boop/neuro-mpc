@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.1 (2026-10-30): field-tested
+- **Loop Deconstructor:** estimates the loop's tempo (file tempo tag, else audio autocorrelation with whole-bar disambiguation; 6/6 on real Apple Drummer loops) and uses its true 1/16 grid (up to 4 bars) instead of squeezing the loop.
+- **Hits classified in context** (band rises at each onset, stored as class overrides). Better than isolated analysis on full-kit recordings; still imperfect (see `KIT.md`).
+- **Timbre map:** the noisiness axis is log-scaled, so real recordings spread out.
+- **Tests:** the field-test tool verifies per-class outputs through the installed VST3 and AU binaries via JUCE plugin hosting.
+
 ## 0.3.0 (2026-10-30): kit intelligence
 - **Sound fingerprints and drum classes** per slice (11 classes), with a timbre map and per-slice class override.
 - **Timbre-Addressed Sequencing:** steps target a slice or a timbre point resolved on the current kit; Retarget to timbre; a timbre gene for Mutation.

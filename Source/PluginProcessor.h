@@ -146,8 +146,9 @@ public:
     bool canUndoSeqPattern (int index) const { return ! seqUndo[(size_t) juce::jlimit (0, numSeqPatterns - 1, index)].empty(); }
     // Loop Deconstructor: slices the loaded loop at its hits, classifies each hit (kick, snare, hats, toms, cymbals...),
     // and writes a pattern with one lane per kit piece (exact slice, velocity and microtiming per hit).
-    struct DeconstructSummary { int hits = 0, steps = 0; std::array<int, neuro::numDrumClasses> perClass {}; };
-    DeconstructSummary deconstructLoop (int patternIndex, double bpm, float sensitivity = 0.7f); // 0.7: catches hits on decaying tails
+    struct DeconstructSummary { int hits = 0, steps = 0; double bpm = 0.0; std::array<int, neuro::numDrumClasses> perClass {}; };
+    // bpm <= 0: estimate the loop's tempo from the audio. sensitivity 0.7 catches hits on decaying tails.
+    DeconstructSummary deconstructLoop (int patternIndex, double bpm = 0.0, float sensitivity = 0.7f);
     // Converts exact-slice steps into timbre-map points, so the pattern re-orchestrates itself on any kit.
     int retargetPatternToTimbre (int patternIndex);
     double getLastHostBpm() const noexcept { return lastHostBpm.load(); }

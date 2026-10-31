@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.22)
 set(CMAKE_OSX_ARCHITECTURES "arm64" CACHE STRING "Target architectures")
 set(CMAKE_OSX_DEPLOYMENT_TARGET "11.0" CACHE STRING "Minimum macOS version")
 
-project(NEURO_MPC VERSION 0.3.0 LANGUAGES C CXX)
+project(NEURO_MPC VERSION 0.3.1 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -92,3 +92,26 @@ target_link_libraries(neuro_engine_tests PRIVATE
     juce::juce_recommended_config_flags
     juce::juce_recommended_warning_flags)
 add_test(NAME engine COMMAND neuro_engine_tests)
+
+# Field test tool (manual, not in ctest): real loops, editor snapshots, hosted VST3/AU outputs.
+juce_add_console_app(neuro_field_test PRODUCT_NAME "neuro_field_test")
+target_sources(neuro_field_test PRIVATE
+    Tests/FieldTest.cpp
+    Source/PluginProcessor.cpp
+    Source/PluginEditor.cpp
+    Source/Audio/VoiceEngine.cpp
+    Source/DSP/TimeStretch.cpp
+    Source/UI/WaveformView.cpp)
+target_include_directories(neuro_field_test PRIVATE Source)
+target_compile_definitions(neuro_field_test PRIVATE
+    JucePlugin_Name="NEURO MPC"
+    JUCE_PLUGINHOST_VST3=1
+    JUCE_PLUGINHOST_AU=1
+    JUCE_WEB_BROWSER=0
+    JUCE_USE_CURL=0)
+target_link_libraries(neuro_field_test PRIVATE
+    juce::juce_audio_utils
+    juce::juce_audio_processors
+    juce::juce_dsp
+    signalsmith-stretch
+    juce::juce_recommended_config_flags)

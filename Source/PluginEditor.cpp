@@ -207,6 +207,7 @@ NeuroMPCEditor::NeuroMPCEditor (NeuroMPCProcessor& p) : AudioProcessorEditor (p)
     for (int c = 0; c < neuro::numDrumClasses; ++c)
         sliceClass.addItem (juce::String ("Class: ") + neuro::drumClassName ((neuro::DrumClass) c), c + 2);
     sliceClass.setTooltip ("Override the detected class of the selected slice (routes it to that class's output)");
+    sliceClass.setTextWhenNothingSelected ("Class: select a slice");
     sliceClass.onChange = [this]
     {
         const auto sel = waveform.getSelectedSlice();
@@ -229,9 +230,9 @@ NeuroMPCEditor::NeuroMPCEditor (NeuroMPCProcessor& p) : AudioProcessorEditor (p)
     deconstructButton.setTooltip ("Slice the loop at its hits, classify each hit, and write a pattern with one lane per kit piece (keeps the groove)");
     deconstructButton.onClick = [this]
     {
-        const auto r = proc.deconstructLoop (proc.getSelectedSeqPattern(), proc.getLastHostBpm(), (float) hitSensitivity.getValue());
+        const auto r = proc.deconstructLoop (proc.getSelectedSeqPattern(), 0.0, (float) hitSensitivity.getValue());
         juce::String text;
-        text << r.hits << " hits -> " << r.steps << "-step pattern " << (proc.getSelectedSeqPattern() + 1) << ":";
+        text << r.hits << " hits at " << juce::roundToInt (r.bpm) << " BPM -> " << r.steps << "-step pattern " << (proc.getSelectedSeqPattern() + 1) << ":";
         for (int c = 0; c < neuro::numDrumClasses; ++c)
             if (r.perClass[(size_t) c] > 0) text << "  " << neuro::drumClassName ((neuro::DrumClass) c) << " " << r.perClass[(size_t) c];
         kitInfo.setText (r.hits > 0 ? text : juce::String ("Load a loop first"), juce::dontSendNotification);
