@@ -1,6 +1,7 @@
 #include "Core/Arpeggiator.h"
 #include "Core/DrumNMF.h"
 #include "Core/MidiClock.h"
+#include "Core/NoteRepeat.h"
 #include "Core/KeyDetector.h"
 #include "Core/MidiMap.h"
 #include "Core/PadBank.h"
@@ -1249,6 +1250,68 @@ static void midiClockTests()
     CHECK (stops == 1);
 }
 
+// Note Repeat: immediate first hit, then the grid; gate sets each hit's length; 1/128; latch; host grid; swing.
+static void noteRepeatTests()
+{
+    constexpr double rate = 48000.0, bps = 2.0 / rate; // 120 BPM
+    struct Hit { int64_t at; bool on; };
+    auto run = [&] (NoteRepeat& nr, NoteRepeat::Settings s, int blocks, std::vector<std::pair<int64_t, std::pair<int, float>>> presses, double beat0 = 0.0)
+    {
+        std::vector<Hit> hits;
+        double beat = beat0;
+        for (int b = 0; b < blocks; ++b)
+        {
+            for (auto& [t, nv] : presses) if (t >= (int64_t) b * 512 && t < (int64_t) (b + 1) * 512) nr.input ((int) (t - b * 512), nv.first, nv.second);
+            nr.process (512, beat, bps, s, [&] (int o, int, float) { hits.push_back ({ (int64_t) b * 512 + o, true }); },
+                                         [&] (int o, int) { hits.push_back ({ (int64_t) b * 512 + o, false }); });
+            nr.endBlock (512);
+            beat += 512 * bps;
+        }
+        return hits;
+    };
+    auto ons = [] (const std::vector<Hit>& h) { std::vector<int64_t> v; for (auto& x : h) if (x.on) v.push_back (x.at); return v; };
+
+    NoteRepeat nr;
+    NoteRepeat::Settings s;
+    s.rateBeats = repeatRateBeats[7]; // 1/16 = 6000 samples
+    auto h = run (nr, s, 60, { { 100, { 36, 0.9f } }, { 20000, { 36, 0.0f } } });
+    auto on = ons (h);
+    std::printf ("  note repeat 1/16: hits at %lld %lld %lld %lld (%zu)\n", (long long) on[0], (long long) on[1], (long long) on[2], (long long) on[3], on.size());
+    CHECK (on.size() == 4 && on[0] == 100 && on[1] == 6100 && on[2] == 12100 && on[3] == 18100); // released at 20000
+    CHECK (h[1].at == 100 + 3000 && ! h[1].on); // gate 50 %: off after 3000 samples
+
+    nr.reset();
+    s.rateBeats = repeatRateBeats[13]; // 1/128 = 750 samples
+    s.gate = 0.1f;
+    h = run (nr, s, 40, { { 0, { 42, 1.0f } }, { 15000, { 42, 0.0f } } });
+    on = ons (h);
+    CHECK (on.size() == 20 && on[1] == 750 && on[19] == 14250 && h[1].at == 75); // 1/128 trap rolls; gate 10 % = 75 samples
+
+    nr.reset();
+    s = {};
+    s.latch = true;
+    h = run (nr, s, 60, { { 0, { 36, 1.0f } }, { 3000, { 36, 0.0f } } });
+    CHECK (ons (h).size() == 6); // latched: keeps repeating after the release (0 .. 30000 every 6000)
+    int offs = 0;
+    nr.stop (0, [&] (int, int) { ++offs; });
+    CHECK (! nr.anyHeld());
+
+    nr.reset();
+    s = {};
+    s.gridFromHost = true;
+    h = run (nr, s, 20, { { 2400, { 36, 1.0f } } }, 0.0); // pressed at beat 0.1: plays now, then the host's 1/16 grid
+    on = ons (h);
+    CHECK (on.size() >= 2 && on[0] == 2400 && on[1] == 6000);
+
+    nr.reset();
+    s = {};
+    s.swing = 0.66f; // second hit of each pair late by 0.32 of a step
+    h = run (nr, s, 30, { { 0, { 36, 1.0f } } });
+    on = ons (h);
+    std::printf ("  note repeat swing 66 %%: hits at %lld %lld %lld\n", (long long) on[0], (long long) on[1], (long long) on[2]);
+    CHECK (on.size() >= 3 && on[1] == 6000 + 1920 && on[2] == 12000);
+}
+
 static void keyTests()
 {
     auto print = [] (const char* name, const KeyEstimate& k)
@@ -1304,6 +1367,7 @@ int main()
     drumNmfTests();
     teachKitTests();
     midiClockTests();
+    noteRepeatTests();
     keyTests();
     std::printf (failures == 0 ? "All core tests passed\n" : "%d failure(s)\n", failures);
     return failures == 0 ? EXIT_SUCCESS : EXIT_FAILURE;

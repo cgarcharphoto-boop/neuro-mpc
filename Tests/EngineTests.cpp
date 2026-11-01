@@ -825,7 +825,7 @@ int main()
             "arpPhrase", "arpVariation", "arpVaryPitch", "arpVaryVelocity", "arpVaryRhythm", "arpReturn", "arpHumanTime",
             "arpHumanVelocity", "seqMode", "seqPattern", "seqRate", "seqSwing", "seqFill", "weaveAccent", "weaveAccentAmount",
             "weaveFill", "weaveFillEvery", "weavePitch", "padBank", "padBankFollow", "padChannel", "levelKick", "levelSnare",
-            "levelClosedHat", "levelOpenHat", "levelTom1", "levelTom2", "levelFloorTom", "levelCrash", "levelRide", "levelPerc", "levelTonal", "chordLock", "chordInput", "chordSplit", "midiClockIn", "midiClockOut", "midiLinkPort", "drumOutputs" };
+            "levelClosedHat", "levelOpenHat", "levelTom1", "levelTom2", "levelFloorTom", "levelCrash", "levelRide", "levelPerc", "levelTonal", "chordLock", "chordInput", "chordSplit", "midiClockIn", "midiClockOut", "midiLinkPort", "drumOutputs", "noteRepeat", "repeatRate", "repeatGate", "repeatSwing", "repeatLatch" };
         NeuroMPCProcessor a;
         juce::StringArray ids;
         for (auto* param : a.getParameters())
@@ -1065,6 +1065,67 @@ int main()
             hs.processBlock (buf, midi);
             CHECK (midi.getNumEvents() == 1 && midi.begin().operator*().data[0] == 0xfc); // Stop
             setParam (hs, ParamIDs::clockOut, 0.0f);
+        }
+
+        // Note Repeat on a held pad (no transport: free grid from the press): 1/16 at 120 BPM = every 6000 samples; a
+        // 25 % gate cuts even a one-shot slice after 1500 samples (+5 ms fade) = glitch chops; 1/128 rolls; off = stop.
+        {
+            NeuroMPCProcessor nr;
+            nr.prepareToPlay (rate, block);
+            CHECK (nr.loadSample (wavFile, error));
+            nr.editSlices ([] (auto& s) { s.grid (4); });
+            setParam (nr, ParamIDs::attack, 0.0f);
+            setParam (nr, ParamIDs::playMode, 0.0f); // one-shot
+            setParam (nr, ParamIDs::noteRepeat, 1.0f);
+            setParam (nr, ParamIDs::repeatRate, 7.0f);  // 1/16
+            setParam (nr, ParamIDs::repeatGate, 25.0f);
+            auto playHeld = [&] (int blocks, int releaseBlock)
+            {
+                std::vector<float> out;
+                juce::AudioBuffer<float> pb (2, block);
+                for (int bi = 0; bi < blocks; ++bi)
+                {
+                    juce::MidiBuffer midi;
+                    if (bi == 0) midi.addEvent (juce::MidiMessage::noteOn (1, 36, 1.0f), 0);
+                    if (bi == releaseBlock) midi.addEvent (juce::MidiMessage::noteOff (1, 36), 0);
+                    nr.processBlock (pb, midi);
+                    out.insert (out.end(), pb.getReadPointer (0), pb.getReadPointer (0) + block);
+                }
+                return out;
+            };
+            auto rx = playHeld (60, 40); // held ~20480 samples
+            auto ron = onsets (rx);
+            int firstLength = 0;
+            while (firstLength < (int) rx.size() && rx[(size_t) firstLength] != 0.0f) ++firstLength;
+            std::printf ("  note repeat 1/16, gate 25 %%: hits at %d %d %d %d (%zu), first hit %d samples\n", ron.size() > 0 ? ron[0] : -1,
+                         ron.size() > 1 ? ron[1] : -1, ron.size() > 2 ? ron[2] : -1, ron.size() > 3 ? ron[3] : -1, ron.size(), firstLength);
+            CHECK (ron.size() == 4 && ron[0] == 0 && ron[1] == 6000 && ron[2] == 12000 && ron[3] == 18000);
+            CHECK (firstLength > 1500 && firstLength < 1500 + 300); // one-shot slice chopped by the gate (5 ms fade)
+
+            setParam (nr, ParamIDs::repeatRate, 13.0f); // 1/128 = 750 samples
+            setParam (nr, ParamIDs::repeatGate, 50.0f);
+            rx = playHeld (24, 12);
+            ron = onsets (rx);
+            std::printf ("  note repeat 1/128: %zu hits in %d samples (every %d)\n", ron.size(), 12 * block, ron.size() > 1 ? ron[1] - ron[0] : -1);
+            CHECK (ron.size() >= 8 && ron[1] - ron[0] == 750);
+
+            setParam (nr, ParamIDs::repeatLatch, 1.0f);
+            rx = playHeld (8, 1);  // released early, latched: keeps going
+            CHECK (onsets (rx).size() >= 4);
+            setParam (nr, ParamIDs::noteRepeat, 0.0f);
+            juce::AudioBuffer<float> tb (2, block);   // note repeat off: the repeats stop
+            juce::MidiBuffer noMidi;
+            std::vector<float> repeatTail;
+            for (int bi = 0; bi < 20; ++bi) { nr.processBlock (tb, noMidi); repeatTail.insert (repeatTail.end(), tb.getReadPointer (0), tb.getReadPointer (0) + block); }
+            CHECK (std::all_of (repeatTail.begin() + 2 * block, repeatTail.end(), [] (float v) { return v == 0.0f; }));
+            setParam (nr, ParamIDs::repeatLatch, 0.0f);
+
+            // 16 Levels: slice 2 on all 16 pads of bank B; velocity mode = 16 fixed levels.
+            nr.sixteenLevels (1, 1, 1);
+            CHECK (nr.getPads()[16].sliceId == nr.getSlices().getSlices()[1].id && nr.getPads()[31].sliceId == nr.getSlices().getSlices()[1].id);
+            CHECK (std::abs (nr.getPads()[16].gain - 1.0f / 16.0f) < 1.0e-6f && std::abs (nr.getPads()[31].gain - 1.0f) < 1.0e-6f && nr.getPads()[16].velocitySensitivity < 1.0e-6f);
+            nr.sixteenLevels (1, 2, 1);
+            CHECK (std::abs (nr.getPads()[16].pitch + 8.0f) < 1.0e-6f && std::abs (nr.getPads()[24].pitch) < 1.0e-6f && std::abs (nr.getPads()[31].pitch - 7.0f) < 1.0e-6f);
         }
 
         // Lanes to MIDI out (e.g. GW-1): MIDI-only lanes are silent in the sampler and send note on/off on their channel

@@ -6,6 +6,7 @@
 #include "AI/DrumExtractor.h"
 #include "Core/DrumNMF.h"
 #include "Core/MidiClock.h"
+#include "Core/NoteRepeat.h"
 #include "Core/Arpeggiator.h"
 #include "Core/MidiMap.h"
 #include "Core/RtShared.h"
@@ -73,6 +74,11 @@ namespace ParamIDs
     inline constexpr auto clockOut     = "midiClockOut";
     inline constexpr auto linkPort     = "midiLinkPort";
     inline constexpr auto drumOutputs  = "drumOutputs";
+    inline constexpr auto noteRepeat   = "noteRepeat";
+    inline constexpr auto repeatRate   = "repeatRate";
+    inline constexpr auto repeatGate   = "repeatGate";
+    inline constexpr auto repeatSwing  = "repeatSwing";
+    inline constexpr auto repeatLatch  = "repeatLatch";
     // Per drum-class level, in DrumClass order.
     inline constexpr const char* classLevel[] { "levelKick", "levelSnare", "levelClosedHat", "levelOpenHat", "levelTom1", "levelTom2",
                                                 "levelFloorTom", "levelCrash", "levelRide", "levelPerc", "levelTonal" };
@@ -166,6 +172,9 @@ public:
     // Kit -> pads: the best hit of each recognised drum on bank A in MPC order (A1 Kick, A2 Snare, A3 Closed Hat...),
     // the other hits on banks B-D, named and coloured. Done after Deconstruct / Separate drums; returns pads assigned.
     int assignKitToPads();
+    // 16 Levels (MPC): one slice on all 16 pads of a bank. mode 1 = velocity (fixed levels 1/16 .. 16/16), 2 = tune
+    // (-8 .. +7 semitones, pad 9 = original).
+    void sixteenLevels (int sliceIndex, int mode, int bank);
     // Folder of the last stems written (Separate drums / Extract drums), else the Separated folder; shown in Finder.
     juce::File getStemsFolder() const { return lastStemsFolder.isDirectory() ? lastStemsFolder : juce::File::getSpecialLocation (juce::File::userMusicDirectory).getChildFile ("NEURO MPC/Separated"); }
     int teachDrum (int component, int sliceIndex);
@@ -314,6 +323,7 @@ private:
     {
         enum Type { noteOff, control, noteOn };
         int offset; Type type; int note; float value; int slice; float pitch;
+        bool repeat = false; // Note Repeat hit: gated even in one-shot mode, short release
     };
     neuro::Arpeggiator arp;
     neuro::Sequencer sequencer;
@@ -331,6 +341,10 @@ private:
     std::vector<neuro::StretchKey> chordRequested;
     std::atomic<float> *chordLockParam = nullptr, *chordInputParam = nullptr, *chordSplitParam = nullptr;
     std::atomic<float> *clockInParam = nullptr, *clockOutParam = nullptr, *linkPortParam = nullptr, *drumOutputsParam = nullptr;
+    std::atomic<float> *noteRepeatParam = nullptr, *repeatRateParam = nullptr, *repeatGateParam = nullptr, *repeatSwingParam = nullptr,
+                       *repeatLatchParam = nullptr;
+    neuro::NoteRepeat noteRepeater;
+    bool repeatWasOn = false, repeatWasLatched = false;
     neuro::MidiLinkPort linkPortOut;
     bool linkPortFailed = false;
     struct LinkEvent { int offset; uint8_t data[3]; int size; };

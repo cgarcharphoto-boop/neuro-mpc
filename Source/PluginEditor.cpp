@@ -172,7 +172,29 @@ NeuroMPCEditor::NeuroMPCEditor (NeuroMPCProcessor& p) : AudioProcessorEditor (p)
 
     bankButtons[0].setToggleState (true, juce::dontSendNotification);
 
-    for (auto* tab : { &sliceTab, &padTab, &arpTab, &genTab, &seqTab, &evolveTab, &kitTab })
+    // Note Repeat, always at hand next to the banks: hold REPEAT and play pads (or map it to a controller button).
+    repeatHold.setComponentID (juce::String ("param:") + ParamIDs::noteRepeat);
+    repeatHold.setColour (juce::TextButton::buttonOnColourId, accent);
+    repeatHold.setTooltip ("Hold, then play pads: they repeat at the rate (1 bar .. 1/128). Gate, swing and latch: CHOP tab. "
+                           "MIDI Learn it to a controller button for a hardware Note Repeat");
+    repeatHold.onStateChange = [this]
+    {
+        if (const auto down = repeatHold.isDown(); down != repeatHeldDown)
+        {
+            repeatHeldDown = down;
+            if (! repeatLock.getToggleState())
+                setRepeat (down);
+        }
+    };
+    repeatLock.setTooltip ("Keep Note Repeat on without holding REPEAT");
+    repeatLock.onClick = [this] { setRepeat (repeatLock.getToggleState()); };
+    for (auto* n : neuro::repeatRateNames) repeatRate.addItem (n, repeatRate.getNumItems() + 1);
+    attachCombo (repeatRate, ParamIDs::repeatRate);
+    repeatRate.setTooltip ("Note Repeat rate: 1 bar .. 1/128 (T = triplet)");
+    for (auto* c : { (juce::Component*) &repeatHold, (juce::Component*) &repeatLock, (juce::Component*) &repeatRate })
+        addAndMakeVisible (c);
+
+    for (auto* tab : { &sliceTab, &padTab, &arpTab, &genTab, &seqTab, &evolveTab, &kitTab, &chopTab })
     {
         tab->setRadioGroupId (2);
         tab->setClickingTogglesState (true);
@@ -187,6 +209,69 @@ NeuroMPCEditor::NeuroMPCEditor (NeuroMPCProcessor& p) : AudioProcessorEditor (p)
     seqTab.onClick   = [this] { showPanel (Panel::seq); };
     evolveTab.onClick = [this] { showPanel (Panel::evolve); };
     kitTab.onClick    = [this] { showPanel (Panel::kit); };
+    chopTab.onClick   = [this] { showPanel (Panel::chop); };
+
+    // ---- Chop panel ----
+    chopTitle.setText ("CHOP", juce::dontSendNotification);
+    chopTitle.setFont (juce::FontOptions (14.0f, juce::Font::bold));
+    chopMode.addItemList ({ "Chop: transients", "Chop: grid", "Chop: kit (drums -> pads)", "Chop: manual (clear)" }, 1);
+    chopMode.setSelectedId (1, juce::dontSendNotification);
+    chopMode.setTooltip ("Transients: a slice per hit. Grid: equal slices. Kit: recognise the drums and put them on pads. "
+                         "Manual: one slice; double-click the waveform to chop (snaps to hits)");
+    for (int n : { 4, 8, 16, 32, 64 }) chopGrid.addItem (juce::String (n) + " slices", n);
+    chopGrid.setSelectedId (16, juce::dontSendNotification);
+    chopSensitivity.setRange (0.05, 1.0, 0.01);
+    chopSensitivity.setValue (0.5, juce::dontSendNotification);
+    chopSensitivity.setTooltip ("Transient sensitivity: more = more slices");
+    chopButton.setTooltip ("Chop the sample with the selected mode");
+    chopButton.onClick = [this]
+    {
+        auto s = proc.getSample();
+        if (s == nullptr) { chopInfo.setText ("Load a sample first", juce::dontSendNotification); return; }
+        switch (chopMode.getSelectedId())
+        {
+            case 1: proc.editSlices ([&] (auto& set) { set.setStarts (neuro::detectTransients (s->buffer.getArrayOfReadPointers(), s->buffer.getNumChannels(),
+                                                                                               s->length(), s->sampleRate, (float) chopSensitivity.getValue())); }); break;
+            case 2: proc.editSlices ([n = chopGrid.getSelectedId()] (auto& set) { set.grid (n); }); break;
+            case 3: proc.deconstructLoop (proc.getSelectedSeqPattern(), 0.0, (float) chopSensitivity.getValue()); break;
+            default: proc.editSlices ([] (auto& set) { set.reset (set.getTotalLength()); }); break;
+        }
+        updateChopPanel();
+    };
+    chopSnap.setToggleState (true, juce::dontSendNotification);
+    chopSnap.setTooltip ("New and dragged slice markers snap to the nearest hit (magnetic chop)");
+    chopSnap.onClick = [this] { waveform.snapToHits = chopSnap.getToggleState(); };
+    slicesToPads.setTooltip ("Pads follow the slices again: slice 1 on A1, slice 2 on A2, ...");
+    slicesToPads.onClick = [this] { proc.editPads ([this] (auto& b) { for (int i = 0; i < neuro::numPads; ++i) { b[i].name.clear(); b[i].colour = neuro::PadDefinition {}.colour; }
+                                                                       b.followSlices = true; b.autoAssign (proc.getSlices()); }); updateChopPanel(); };
+    chopKitToPads.setTooltip (kitToPads.getTooltip());
+    chopKitToPads.onClick = [this] { proc.assignKitToPads(); updateChopPanel(); };
+    levelsMode.addItemList ({ "16 Levels: off", "16 Levels: velocity", "16 Levels: tune" }, 1);
+    levelsMode.setSelectedId (1, juce::dontSendNotification);
+    levelsMode.setTooltip ("Put the selected slice on all 16 pads of the current bank, in 16 velocity levels or 16 semitones");
+    levelsMode.onChange = [this]
+    {
+        if (const auto mode = levelsMode.getSelectedId() - 1; mode > 0 && waveform.getSelectedSlice() >= 0)
+            proc.sixteenLevels (waveform.getSelectedSlice(), mode, currentBank);
+        else if (mode > 0)
+            chopInfo.setText ("Select a slice first", juce::dontSendNotification);
+        levelsMode.setSelectedId (1, juce::dontSendNotification);
+    };
+    chopAttachments.push_back (std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (proc.apvts, ParamIDs::repeatGate, repeatGate));
+    chopAttachments.push_back (std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (proc.apvts, ParamIDs::repeatSwing, repeatSwing));
+    repeatGate.setComponentID (juce::String ("param:") + ParamIDs::repeatGate);
+    repeatSwing.setComponentID (juce::String ("param:") + ParamIDs::repeatSwing);
+    repeatGate.setTextValueSuffix (" % gate");
+    repeatSwing.setTextValueSuffix (" % swing");
+    for (auto* sl : { &repeatGate, &repeatSwing }) sl->setTextBoxStyle (juce::Slider::TextBoxRight, false, 86, 20);
+    repeatGate.setTooltip ("Note Repeat gate: length of each hit. Short = stutter / glitch, even on long samples");
+    repeatSwing.setTooltip ("Note Repeat swing: every second hit late (50 = straight)");
+    attachButton (repeatLatch, ParamIDs::repeatLatch);
+    repeatLatch.setTooltip ("Latch: pads keep repeating after you let go (turn off to stop)");
+    repeatPad.onHold = [this] (bool down) { if (! repeatLock.getToggleState()) setRepeat (down); };
+    repeatPad.setTooltip ("Hold to repeat: left-right = rate (1 bar .. 1/128), down-up = gate");
+    for (auto* c : chopPanelComponents())
+        addAndMakeVisible (c);
 
     // ---- Kit panel ----
     for (auto* c : kitPanelComponents())
@@ -1145,7 +1230,10 @@ void NeuroMPCEditor::registerMappables()
              { &mutSeed, "evolve.seed" }, { &kitTab, "view.kit" }, { &sliceClass, "kit.sliceClass" }, { &laneClass, "kit.laneClass" },
              { &hitSensitivity, "kit.hitSensitivity" }, { &deconstructButton, "kit.deconstruct" }, { &separateButton, "kit.separate" }, { &retargetButton, "kit.retarget" },
              { &stepToSlice, "kit.stepToSlice" }, { &stepToTimbre, "kit.stepToTimbre" }, { &stepToPad, "kit.stepToPad" },
-             { &extractAiButton, "kit.extractAi" }, { &teachKick, "kit.teachKick" }, { &teachSnare, "kit.teachSnare" }, { &teachHat, "kit.teachHat" }, { &teachClear, "kit.teachClear" }, { &showStems, "kit.showStems" }, { &kitToPads, "kit.toPads" } })
+             { &extractAiButton, "kit.extractAi" }, { &teachKick, "kit.teachKick" }, { &teachSnare, "kit.teachSnare" }, { &teachHat, "kit.teachHat" }, { &teachClear, "kit.teachClear" }, { &showStems, "kit.showStems" }, { &kitToPads, "kit.toPads" }, { &repeatLock, "repeat.lock" },
+             { &chopTab, "view.chop" }, { &chopMode, "chop.mode" }, { &chopGrid, "chop.grid" }, { &chopSensitivity, "chop.sensitivity" },
+             { &chopButton, "chop.go" }, { &chopSnap, "chop.snap" }, { &slicesToPads, "chop.slicesToPads" }, { &chopKitToPads, "chop.kitToPads" },
+             { &levelsMode, "chop.levels" } })
         id (*c, name);
 
     for (int pc = 0; pc < 12; ++pc)
@@ -1551,6 +1639,34 @@ std::vector<juce::Component*> NeuroMPCEditor::kitPanelComponents()
     return list;
 }
 
+std::vector<juce::Component*> NeuroMPCEditor::chopPanelComponents()
+{
+    return { &chopTitle, &chopInfo, &chopMode, &chopGrid, &chopSensitivity, &chopButton, &chopSnap, &slicesToPads, &chopKitToPads,
+             &levelsMode, &repeatPad, &repeatGate, &repeatSwing, &repeatLatch };
+}
+
+void NeuroMPCEditor::updateChopPanel()
+{
+    const auto sel = waveform.getSelectedSlice();
+    const auto& slices = proc.getSlices().getSlices();
+    auto s = proc.getSample();
+    juce::String text;
+    text << slices.size() << " slices";
+
+    if (s != nullptr && sel >= 0 && sel < (int) slices.size())
+    {
+        const auto& sl = slices[(size_t) sel];
+        const auto cls = sl.effectiveClass();
+        text << "  |  slice " << (sel + 1) << ": " << (cls >= 0 ? neuro::drumClassName ((neuro::DrumClass) cls) : "?")
+             << ", " << juce::roundToInt ((double) sl.length() / s->sampleRate * 1000.0) << " ms";
+    }
+
+    text << "  |  keys: Del remove, arrows nudge/select, Space play";
+    chopInfo.setText (text, juce::dontSendNotification);
+    chopGrid.setVisible (activePanel == Panel::chop && chopMode.getSelectedId() == 2);
+    chopSensitivity.setVisible (activePanel == Panel::chop && chopMode.getSelectedId() != 2 && chopMode.getSelectedId() != 4);
+}
+
 void NeuroMPCEditor::updateKitPanel()
 {
     const auto sel = waveform.getSelectedSlice();
@@ -1708,6 +1824,7 @@ void NeuroMPCEditor::showPanel (Panel p)
     for (auto* c : seqPanelComponents())   c->setVisible (p == Panel::seq);
     for (auto* c : evolvePanelComponents()) c->setVisible (p == Panel::evolve);
     for (auto* c : kitPanelComponents())    c->setVisible (p == Panel::kit);
+    for (auto* c : chopPanelComponents())   c->setVisible (p == Panel::chop);
 
     info.setVisible (p == Panel::slice || p == Panel::pad || p == Panel::arp); // the others use the info area too
 
@@ -1718,6 +1835,8 @@ void NeuroMPCEditor::showPanel (Panel p)
     seqTab.setToggleState (p == Panel::seq, juce::dontSendNotification);
     evolveTab.setToggleState (p == Panel::evolve, juce::dontSendNotification);
     kitTab.setToggleState (p == Panel::kit, juce::dontSendNotification);
+    chopTab.setToggleState (p == Panel::chop, juce::dontSendNotification);
+    if (p == Panel::chop) updateChopPanel();
 
     if (p == Panel::pad) updatePadPanel();
     if (p == Panel::arp) updateArpPanel();
@@ -1902,8 +2021,18 @@ void NeuroMPCEditor::updateAiStatus()
     shownAiState = (int) state;
 }
 
+void NeuroMPCEditor::setRepeat (bool on)
+{
+    auto* p = proc.apvts.getParameter (ParamIDs::noteRepeat);
+    p->beginChangeGesture();
+    p->setValueNotifyingHost (on ? 1.0f : 0.0f);
+    p->endChangeGesture();
+}
+
 void NeuroMPCEditor::timerCallback()
 {
+    repeatHold.setToggleState (proc.apvts.getRawParameterValue (ParamIDs::noteRepeat)->load() > 0.5f, juce::dontSendNotification);
+
     updateAiStatus();
 
     if (shownSampleVersion != proc.getSampleVersion())
@@ -2010,6 +2139,9 @@ void NeuroMPCEditor::resized()
     auto padColumn = bottom.removeFromLeft (juce::jmin (300, bottom.getHeight() - 26));
     auto bankRow = padColumn.removeFromTop (22);
 
+    repeatRate.setBounds (bankRow.removeFromRight (76));
+    repeatLock.setBounds (bankRow.removeFromRight (50));
+    repeatHold.setBounds (bankRow.removeFromRight (64).reduced (2, 0));
     const auto bankWidth = bankRow.getWidth() / neuro::numBanks;
 
     for (auto& b : bankButtons)
@@ -2052,6 +2184,7 @@ void NeuroMPCEditor::resized()
     seqTab.setBounds (tabs.removeFromLeft (70));
     evolveTab.setBounds (tabs.removeFromLeft (76));
     kitTab.setBounds (tabs.removeFromLeft (60));
+    chopTab.setBounds (tabs.removeFromLeft (64));
     titleArea = tabs;
     bottom.removeFromTop (6);
     const auto panelArea = bottom.removeFromTop (142);
@@ -2288,6 +2421,38 @@ void NeuroMPCEditor::resized()
 
         ep.removeFromTop (8);
         genomeInfo.setBounds (ep);
+    }
+
+    // Chop panel: chop tools on the left, the Repeat XY pad + gate/swing/latch on the right; also uses the info area.
+    {
+        auto cp = panelArea.withBottom (bottom.getBottom());
+        auto right = cp.removeFromRight (juce::jmin (260, cp.getWidth() / 3));
+        cp.removeFromRight (12);
+        auto row = [&cp] (int h = 24) { auto r = cp.removeFromTop (h); cp.removeFromTop (8); return r; };
+        auto r0 = row();
+        chopTitle.setBounds (r0.removeFromLeft (56));
+        chopMode.setBounds (r0.removeFromLeft (210));
+        r0.removeFromLeft (6);
+        chopGrid.setBounds (r0.withWidth (120));
+        chopSensitivity.setBounds (r0.removeFromLeft (170));
+        r0.removeFromLeft (6);
+        chopButton.setBounds (r0.removeFromLeft (70));
+        auto r1 = row();
+        for (auto* c : { (juce::Component*) &chopSnap, (juce::Component*) &slicesToPads, (juce::Component*) &chopKitToPads })
+        {
+            c->setBounds (r1.removeFromLeft (118));
+            r1.removeFromLeft (6);
+        }
+        levelsMode.setBounds (r1.removeFromLeft (170));
+        chopInfo.setBounds (row (40));
+
+        repeatPad.setBounds (right.removeFromTop (juce::jmin (110, right.getHeight() - 60)));
+        right.removeFromTop (6);
+        auto rr = right.removeFromTop (22);
+        repeatLatch.setBounds (rr.removeFromRight (64));
+        repeatGate.setBounds (rr);
+        right.removeFromTop (4);
+        repeatSwing.setBounds (right.removeFromTop (22).withTrimmedRight (64));
     }
 
     // Kit panel: timbre map on the left, controls on the right; also uses the info area.

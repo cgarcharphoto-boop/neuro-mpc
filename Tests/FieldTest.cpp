@@ -112,12 +112,12 @@ namespace
         p.waitForBackgroundWork (30000);
         std::unique_ptr<juce::AudioProcessorEditor> ed (p.createEditor());
         auto* editor = dynamic_cast<NeuroMPCEditor*> (ed.get());
-        for (int tab : { 4, 6 })
+        for (int tab : { 4, 6, 7 })
         {
             editor->showTab (tab);
             editor->setSize (1140, 840);
             const auto image = editor->createComponentSnapshot (editor->getLocalBounds(), true, 1.0f);
-            const auto file = outDir.getChildFile (tab == 6 ? "kit_tab.png" : "seq_tab.png");
+            const auto file = outDir.getChildFile (tab == 6 ? "kit_tab.png" : tab == 7 ? "chop_tab.png" : "seq_tab.png");
             file.deleteFile();
             juce::FileOutputStream out (file);
             juce::PNGImageFormat().writeImageToStream (image, out);

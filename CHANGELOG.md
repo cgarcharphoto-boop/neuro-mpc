@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.2.0 (2026-11-01): CHOP screen and Note Repeat
+- **Note Repeat:** **REPEAT** (hold) and **Lock** next to the bank buttons.
+  - **Rates:** 1 bar … **1/128** with triplets.
+  - **Gate:** 1–100 %, cuts even One-Shot samples (glitch).
+  - **Also:** swing and latch. All MIDI mappable.
+- **CHOP tab:**
+  - **Chop modes:** transients, grid, kit (drums → pads) or manual.
+  - **Snap to hits:** magnetic chop.
+  - **Pads:** Slices → pads, Kit → pads, **16 Levels** (velocity / tune).
+  - **Repeat XY pad:** hold to repeat; X = rate, Y = gate.
+- **Waveform:** a crosshair with time, slices tinted by drum, and keys: Delete removes a marker, arrows nudge it or select slices, Space plays.
+- Details in `Documentation/CHOP.md`.
+
 ## 1.1.2 (2026-10-31): Release of the 1.1.1 fixes
 - Same features as 1.1.1. CI now builds on macOS 15 runners (GitHub retires macOS 14 images on 2026-11-02; the 1.1.1 build was cancelled by a runner brownout, so it was never released).
 

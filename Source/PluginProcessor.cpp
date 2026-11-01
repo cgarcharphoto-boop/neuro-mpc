@@ -81,6 +81,11 @@ NeuroMPCProcessor::NeuroMPCProcessor()
     clockOutParam   = apvts.getRawParameterValue (ParamIDs::clockOut);
     linkPortParam   = apvts.getRawParameterValue (ParamIDs::linkPort);
     drumOutputsParam = apvts.getRawParameterValue (ParamIDs::drumOutputs);
+    noteRepeatParam  = apvts.getRawParameterValue (ParamIDs::noteRepeat);
+    repeatRateParam  = apvts.getRawParameterValue (ParamIDs::repeatRate);
+    repeatGateParam  = apvts.getRawParameterValue (ParamIDs::repeatGate);
+    repeatSwingParam = apvts.getRawParameterValue (ParamIDs::repeatSwing);
+    repeatLatchParam = apvts.getRawParameterValue (ParamIDs::repeatLatch);
     padNoteHeld.fill (-1);
 
     for (int i = 0; i < neuro::padsPerBank; ++i)
@@ -241,7 +246,16 @@ juce::AudioProcessorValueTreeState::ParameterLayout NeuroMPCProcessor::createLay
                 // Virtual MIDI source "NEURO MPC": MIDI-out lanes and clock for GW-1, KAOSS NEXUS, other apps.
                 std::make_unique<AudioParameterBool> (ParameterID { ParamIDs::linkPort, 1 }, "MIDI Link Port", false),
                 // Off: everything plays on the main output. On: each drum class on its own output (Kick, Snare, ...).
-                std::make_unique<AudioParameterBool> (ParameterID { ParamIDs::drumOutputs, 1 }, "Separate Drum Outputs", false));
+                std::make_unique<AudioParameterBool> (ParameterID { ParamIDs::drumOutputs, 1 }, "Separate Drum Outputs", false),
+                // Note Repeat (MPC-style): held pads retrigger from 1 bar to 1/128; gate = length of each hit (glitch).
+                std::make_unique<AudioParameterBool> (ParameterID { ParamIDs::noteRepeat, 1 }, "Note Repeat", false),
+                std::make_unique<AudioParameterChoice> (ParameterID { ParamIDs::repeatRate, 1 }, "Note Repeat Rate",
+                                                        [] { StringArray a; for (auto* n : neuro::repeatRateNames) a.add (n); return a; }(), 7),
+                std::make_unique<AudioParameterFloat> (ParameterID { ParamIDs::repeatGate, 1 }, "Note Repeat Gate",
+                                                       NormalisableRange<float> (1.0f, 100.0f, 1.0f), 50.0f, AudioParameterFloatAttributes().withLabel ("%")),
+                std::make_unique<AudioParameterFloat> (ParameterID { ParamIDs::repeatSwing, 1 }, "Note Repeat Swing",
+                                                       NormalisableRange<float> (50.0f, 75.0f, 1.0f), 50.0f, AudioParameterFloatAttributes().withLabel ("%")),
+                std::make_unique<AudioParameterBool> (ParameterID { ParamIDs::repeatLatch, 1 }, "Note Repeat Latch", false));
     return layout;
 }
 
@@ -265,6 +279,7 @@ void NeuroMPCProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     hostSampleRate = sampleRate;
     clockFollower.prepare (sampleRate);
     clockLeader = {};
+    noteRepeater.reset();
     blockStartTime = 0;
     lastClockBeatEnd = -1.0e9;
     modBuffer.assign ((size_t) juce::jmax (1024, samplesPerBlock), 0.0f);
@@ -401,8 +416,32 @@ void NeuroMPCProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     auto beatAt = [&] (int offset) { return (hostPpq ? *hostPpq : freeBeatOrigin) + offset * beatsPerSample; };
     int arpPos = 0;
 
+    // Note Repeat: switching it (or its latch) off ends the repeats; while on, played notes feed the repeater (it has
+    // priority over the arpeggiator).
+    const auto repeatOn = noteRepeatParam->load() > 0.5f;
+    const auto repeatLatched = repeatLatchParam->load() > 0.5f;
+    auto repeatOff = [&] (int offset, int note)
+    {
+        push (offset, Event::noteOff, note, 0.0f);
+        if (numEvents > 0) events[numEvents - 1].repeat = true;
+    };
+
+    if (repeatWasOn && ! repeatOn)
+        noteRepeater.stop (0, repeatOff);
+    else if (repeatWasLatched && ! repeatLatched)
+        noteRepeater.releaseLatched();
+
+    repeatWasOn = repeatOn;
+    repeatWasLatched = repeatLatched;
+
     auto noteInput = [&] (int offset, int note, float velocity)
     {
+        if (repeatOn)
+        {
+            noteRepeater.input (offset, note, velocity);
+            return;
+        }
+
         if (! arpOn)
         {
             push (offset, velocity > 0.0f ? Event::noteOn : Event::noteOff, note, velocity);
@@ -530,6 +569,26 @@ void NeuroMPCProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     arp.endBlock (numSamples);
     arpHeldCount.store (arp.heldCount());
 
+    // ---- Note Repeat hits for this block (host bar grid when the transport runs) ----
+    if (repeatOn)
+    {
+        neuro::NoteRepeat::Settings rs;
+        rs.rateBeats = neuro::repeatRateBeats[(size_t) juce::jlimit (0, (int) neuro::repeatRateBeats.size() - 1, (int) repeatRateParam->load())];
+        rs.gate = repeatGateParam->load() / 100.0f;
+        rs.swing = repeatSwingParam->load() / 100.0f;
+        rs.latch = repeatLatched;
+        rs.gridFromHost = hostPpq.has_value();
+        noteRepeater.process (numSamples, beatAt (0), beatsPerSample, rs,
+                              [&] (int offset, int note, float velocity)
+                              {
+                                  push (offset, Event::noteOn, note, velocity);
+                                  if (numEvents > 0) events[numEvents - 1].repeat = true;
+                              },
+                              repeatOff);
+    }
+
+    noteRepeater.endBlock (numSamples);
+
     // ---- Step sequencer: Host = follows the host transport (PPQ); Free = own clock from bar 1 when switched on ----
     {
         const auto mode = (int) seqModeParam->load();
@@ -637,14 +696,21 @@ void NeuroMPCProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     }
 
     // ---- Render between events ----
-    auto handle = [&] (int note, float velocity, int slice, float pitch)
+    // Note Repeat hits are gated even in one-shot mode, with a 5 ms release, so the gate chops any sample cleanly.
+    auto repeatParams = vp;
+    repeatParams.oneShot = false;
+    repeatParams.releaseMs = juce::jmin (vp.releaseMs, 5.0f);
+
+    auto handle = [&] (int note, float velocity, int slice, float pitch, bool repeat)
     {
+        const auto& p = repeat ? repeatParams : vp;
+
         if (velocity <= 0.0f)
             engine.noteOff (note);
         else if (s != nullptr && sl != nullptr && slice >= 0)
-            engine.playSlice (slice, note, velocity, pitch, 0, *s, *sl, bank, vp);
+            engine.playSlice (slice, note, velocity, pitch, 0, *s, *sl, bank, p);
         else if (s != nullptr && sl != nullptr)
-            engine.noteOn (note, velocity, *s, *sl, bank, padMap, vp, pitch);
+            engine.noteOn (note, velocity, *s, *sl, bank, padMap, p, pitch);
     };
 
     int pos = 0;
@@ -664,7 +730,7 @@ void NeuroMPCProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
         }
         else
         {
-            handle (e.note, e.type == Event::noteOn ? e.value : 0.0f, e.slice, e.pitch);
+            handle (e.note, e.type == Event::noteOn ? e.value : 0.0f, e.slice, e.pitch, e.repeat);
         }
     }
 
@@ -1572,6 +1638,30 @@ void NeuroMPCProcessor::updateLinkPort()
         if (linkPortOut.opened())
             linkPortOut.close();
     }
+}
+
+void NeuroMPCProcessor::sixteenLevels (int sliceIndex, int mode, int bank)
+{
+    const std::scoped_lock lock (modelLock);
+
+    if (sliceIndex < 0 || sliceIndex >= slices.size() || mode < 1 || mode > 2)
+        return;
+
+    const auto id = slices.getSlices()[(size_t) sliceIndex].id;
+    const auto base = juce::jlimit (0, neuro::numBanks - 1, bank) * neuro::padsPerBank;
+
+    editPads ([&] (neuro::PadBank& b)
+    {
+        for (int i = 0; i < neuro::padsPerBank; ++i)
+        {
+            auto& pad = b[base + i];
+            b.assign (base + i, id);
+            pad.gain = mode == 1 ? (float) (i + 1) / 16.0f : 1.0f;
+            pad.velocitySensitivity = mode == 1 ? 0.0f : 1.0f;
+            pad.pitch = mode == 2 ? (float) (i - 8) : 0.0f;
+            pad.name = mode == 1 ? "Level " + std::to_string (i + 1) : (i >= 8 ? "+" : "") + std::to_string (i - 8) + " st";
+        }
+    });
 }
 
 int NeuroMPCProcessor::assignKitToPads()

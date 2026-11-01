@@ -1,4 +1,5 @@
 #include "WaveformView.h"
+#include "../Core/TransientDetector.h"
 
 namespace
 {
@@ -8,7 +9,101 @@ namespace
 
 WaveformView::WaveformView (NeuroMPCProcessor& p) : proc (p)
 {
+    setWantsKeyboardFocus (true);
     sampleChanged();
+}
+
+int64_t WaveformView::snapped (int64_t pos)
+{
+    auto sample = proc.getSample();
+
+    if (! snapToHits || sample == nullptr)
+        return pos;
+
+    if (hitsFor != sample.get()) // computed once per sample
+    {
+        hits = neuro::detectTransients (sample->buffer.getArrayOfReadPointers(), sample->buffer.getNumChannels(), sample->length(),
+                                        sample->sampleRate, 0.6f);
+        hitsFor = sample.get();
+    }
+
+    const auto it = std::lower_bound (hits.begin(), hits.end(), pos);
+    auto best = pos;
+    auto bestPx = 12.0f;
+
+    for (auto c : { it, it == hits.begin() ? it : it - 1 })
+        if (c != hits.end())
+            if (const auto px = std::abs (sampleToX (*c) - sampleToX (pos)); px < bestPx)
+            {
+                bestPx = px;
+                best = *c;
+            }
+
+    return best;
+}
+
+void WaveformView::selectSlice (int index)
+{
+    if (index < 0 || index >= proc.getSlices().size())
+        return;
+
+    selected = index;
+    if (onSliceClicked)
+        onSliceClicked();
+    repaint();
+}
+
+void WaveformView::mouseExit (const juce::MouseEvent&)
+{
+    hoverX = -1.0f;
+    hoveredMarker = -1;
+    repaint();
+}
+
+bool WaveformView::keyPressed (const juce::KeyPress& key)
+{
+    if (proc.getSample() == nullptr)
+        return false;
+
+    const auto code = key.getKeyCode();
+    const auto& slices = proc.getSlices().getSlices();
+
+    if (code == juce::KeyPress::deleteKey || code == juce::KeyPress::backspaceKey)
+    {
+        const auto marker = hoveredMarker > 0 ? hoveredMarker : selected;
+        if (marker > 0)
+            proc.editSlices ([marker] (auto& set) { set.mergeWithPrevious (marker); });
+        hoveredMarker = -1;
+        selected = juce::jmin (selected, proc.getSlices().size() - 1);
+        repaint();
+        return true;
+    }
+
+    if ((code == juce::KeyPress::leftKey || code == juce::KeyPress::rightKey) && selected > 0 && selected < (int) slices.size())
+    {
+        const auto step = key.getModifiers().isShiftDown() ? (int64_t) 1
+                                                             : juce::jmax<int64_t> (1, (viewEnd - viewStart) / juce::jmax (1, getWidth()));
+        const auto pos = slices[(size_t) selected].startSample + (code == juce::KeyPress::leftKey ? -step : step);
+        proc.editSlices ([this, pos] (auto& set) { set.moveStart (selected, pos); });
+        repaint();
+        return true;
+    }
+
+    if (code == juce::KeyPress::upKey || code == juce::KeyPress::downKey)
+    {
+        selectSlice (juce::jlimit (0, (int) slices.size() - 1, selected + (code == juce::KeyPress::downKey ? 1 : -1)));
+        return true;
+    }
+
+    if (code == juce::KeyPress::spaceKey && selected >= 0)
+    {
+        if (auditioning >= 0)
+            proc.stopAudition (auditioning);
+        auditioning = proc.startSliceAudition (selected);
+        return true;
+    }
+
+    return false;
 }
 
 void WaveformView::sampleChanged()
@@ -77,8 +172,10 @@ void WaveformView::paint (juce::Graphics& g)
         if (x1 < 0.0f || x0 > (float) getWidth())
             continue;
 
-        g.setColour ((int) i == selected ? accent.withAlpha (0.18f)
-                                         : juce::Colours::white.withAlpha (i % 2 == 0 ? 0.03f : 0.0f));
+        const auto cls = slices[i].effectiveClass();
+        g.setColour ((int) i == selected ? accent.withAlpha (0.22f)
+                     : cls >= 0           ? juce::Colour (neuro::drumClassColour (cls)).withAlpha (0.10f) // drum-aware: tinted by class
+                                          : juce::Colours::white.withAlpha (i % 2 == 0 ? 0.03f : 0.0f));
         g.fillRect (x0, 0.0f, x1 - x0, h);
     }
 
@@ -112,12 +209,23 @@ void WaveformView::paint (juce::Graphics& g)
         g.setColour (juce::Colours::white);
         g.drawVerticalLine ((int) sampleToX (ph), 0.0f, h);
     }
+
+    if (hoverX >= 0.0f) // crosshair: where a chop would land (snapped), with its time
+    {
+        const auto at = hoveredMarker > 0 ? slices[(size_t) hoveredMarker].startSample : snapped (xToSample (hoverX));
+        const auto x = sampleToX (at);
+        g.setColour (juce::Colours::white.withAlpha (hoveredMarker > 0 ? 0.9f : 0.45f));
+        g.drawVerticalLine ((int) x, 0.0f, h);
+        g.drawText (juce::String ((double) at / sample->sampleRate, 3) + " s", (int) x + 4, getHeight() - 28, 70, 14, juce::Justification::left);
+    }
 }
 
 void WaveformView::mouseMove (const juce::MouseEvent& e)
 {
-    setMouseCursor (markerNear ((float) e.x) > 0 ? juce::MouseCursor::LeftRightResizeCursor
-                                                  : juce::MouseCursor::NormalCursor);
+    hoveredMarker = markerNear ((float) e.x);
+    hoverX = (float) e.x;
+    setMouseCursor (hoveredMarker > 0 ? juce::MouseCursor::LeftRightResizeCursor : juce::MouseCursor::CrosshairCursor);
+    repaint();
 }
 
 void WaveformView::mouseDown (const juce::MouseEvent& e)
@@ -125,6 +233,7 @@ void WaveformView::mouseDown (const juce::MouseEvent& e)
     if (proc.getSample() == nullptr)
         return;
 
+    grabKeyboardFocus();
     auto marker = markerNear ((float) e.x);
 
     if (e.mods.isPopupMenu())
@@ -159,7 +268,7 @@ void WaveformView::mouseDrag (const juce::MouseEvent& e)
 {
     if (dragging > 0)
     {
-        auto pos = xToSample ((float) e.x);
+        auto pos = snapped (xToSample ((float) e.x));
         proc.editSlices ([this, pos] (auto& s) { s.moveStart (dragging, pos); });
         repaint();
     }
@@ -180,7 +289,7 @@ void WaveformView::mouseDoubleClick (const juce::MouseEvent& e)
     if (proc.getSample() == nullptr || markerNear ((float) e.x) > 0)
         return;
 
-    auto pos = xToSample ((float) e.x);
+    auto pos = snapped (xToSample ((float) e.x));
     proc.editSlices ([pos] (auto& s) { s.split (pos); });
     repaint();
 }
